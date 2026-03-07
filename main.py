@@ -98,7 +98,9 @@ class AirType:
     # ── ホットキーイベント ────────────────
     def _on_press(self, key):
         self._pressed_keys.add(key)
-        print(f"[DEBUG] key={key!r}  pressed={self._pressed_keys!r}", flush=True)
+        if key == keyboard.KeyCode(char='\x03'):  # Ctrl+C
+            print("\n[AirType] 終了します")
+            return False
         if self._is_hotkey():
             self._handle_toggle()
 

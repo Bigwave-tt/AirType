@@ -23,7 +23,7 @@ from pynput import keyboard
 
 from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
-from step3_refiner import OllamaRefiner
+from step3_refiner import RuleBasedRefiner
 from step4_paster import Paster
 
 
@@ -31,7 +31,6 @@ from step4_paster import Paster
 # 設定
 # ─────────────────────────────────────
 WHISPER_MODEL = "large-v3"        # tiny / base / small / medium / large-v3
-OLLAMA_MODEL = "deepseek-r1:7b"   # ollama pull deepseek-r1:7b で取得
 HOTKEY = {
     keyboard.Key.ctrl_l,
     keyboard.Key.shift,
@@ -68,7 +67,7 @@ class AirType:
         # 各モジュール初期化
         self.recorder = Recorder()
         self.transcriber = WhisperTranscriber(model_size=WHISPER_MODEL)
-        self.refiner = OllamaRefiner(model=OLLAMA_MODEL)
+        self.refiner = RuleBasedRefiner()
         self.paster = Paster()
 
         # 状態管理

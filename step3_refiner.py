@@ -1,182 +1,132 @@
 """
-AirType - Step 3: Ollama API によるテキスト整形
- 
+AirType - Step 3: ルールベースによるテキスト整形
+
 設計:
-- OllamaRefiner クラスで Ollama の /api/generate エンドポイントをラップ
-- DeepSeek-R1 系モデルが出力する <think>...</think> タグを除去
-- タイムアウト・接続エラーは例外として上位に伝播 (Step 5 でハンドリング)
+- 正規表現によるフィラー・言い淀み除去（LLM不要・ほぼ瞬時に処理）
+- Whisper の出力品質が高いため、フィラー除去 + 空白正規化で十分
 - 単体テスト: このファイルを直接実行するとテキスト整形を試せる
 """
- 
+
 import re
-import json
-from typing import Optional
- 
-import requests
- 
- 
+
+
 # ─────────────────────────────────────
-# 定数
+# フィラーパターン定義
 # ─────────────────────────────────────
-OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "deepseek-r1:7b"      # ollama pull deepseek-r1:7b で取得
-REQUEST_TIMEOUT = 120                  # 秒 (LLM 推論には時間がかかる)
- 
-# 整形プロンプト
-REFINE_SYSTEM_PROMPT = (
-    "あなたは音声認識テキストの校正アシスタントです。"
-    "入力テキストと同じ言語で出力してください。絶対に翻訳しないでください。"
-    "与えられたテキストのみを修正し、説明や前置き、コメントは一切出力しないでください。"
-)
- 
-REFINE_USER_TEMPLATE = """\
-以下の音声認識テキストから「えーっと」「あのー」「まあ」「なんか」などのフィラーや言い淀みを取り除き、\
-文脈を補完して、文法的に自然で読みやすい文章に修正してください。\
-入力が日本語なら日本語で、英語なら英語で出力してください。絶対に翻訳しないでください。\
-修正後のテキストのみを出力してください。
- 
-音声認識テキスト:
-{raw_text}"""
- 
- 
+# 各パターンは「フィラー本体 + 後続の読点・スペース」を除去する
+# 順序重要: 長いパターンを先に配置して誤マッチを防ぐ
+_FILLER_PATTERNS = [
+    # えー系
+    r'えーっと[、,，\s]*',
+    r'えーと[、,，\s]*',
+    r'えっと[、,，\s]*',
+    r'えー[、,，\s]+',        # 「えー」単体は後続記号がある場合のみ除去
+
+    # あの系（「あの人」などを守るため、後続に読点/スペースがある場合のみ）
+    r'あのー[、,，\s]*',
+    r'あのう[、,，\s]*',
+    r'あの[、,，\s]+',
+
+    # うん・うーん系
+    r'うーんと[、,，\s]*',
+    r'うーん[、,，\s]*',
+
+    # まあ系（「まあまあ」は残す）
+    r'まーあ[、,，\s]*',
+    r'まあー[、,，\s]*',
+    r'まあ[、,，\s]+',        # 後続記号がある場合のみ
+
+    # なんか系
+    r'なんかー[、,，\s]*',
+    r'なんか[、,，\s]+',
+
+    # そのー系
+    r'そのー[、,，\s]*',
+
+    # ほら系
+    r'ほらー[、,，\s]*',
+    r'ほら[、,，\s]+',
+
+    # ねー系（文末以外）
+    r'ねー[、,，\s]+',
+
+    # やっぱ系
+    r'やっぱりー[、,，\s]*',
+    r'やっぱー[、,，\s]*',
+]
+
+# コンパイル済みパターン（起動時に1回だけコンパイル）
+_COMPILED_PATTERNS = [re.compile(p) for p in _FILLER_PATTERNS]
+
+
 # ─────────────────────────────────────
-# OllamaRefiner クラス
+# RuleBasedRefiner クラス
 # ─────────────────────────────────────
-class OllamaRefiner:
+class RuleBasedRefiner:
     """
-    Ollama の REST API を使ってテキストを整形する。
- 
-    Parameters
-    ----------
-    model : str
-        Ollama で pull 済みのモデル名 (例: "deepseek-r1:7b")
-    base_url : str
-        Ollama サーバーの URL (デフォルト: http://localhost:11434)
-    timeout : int
-        API タイムアウト秒数
+    正規表現ルールによりフィラー・言い淀みを除去するテキスト整形クラス。
+
+    LLM不要・ほぼ瞬時（<1ms）に処理完了。
+    Whisperの出力品質が高い場合はこちらで十分。
     """
- 
-    def __init__(
-        self,
-        model: str = DEFAULT_MODEL,
-        base_url: str = OLLAMA_BASE_URL,
-        timeout: int = REQUEST_TIMEOUT,
-    ):
-        self.model = model
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self._check_connection()
- 
-    def _check_connection(self):
-        """Ollama サーバーへの疎通確認"""
-        try:
-            resp = requests.get(f"{self.base_url}/api/tags", timeout=5)
-            resp.raise_for_status()
-            models = [m["name"] for m in resp.json().get("models", [])]
-            print(f"[Refiner] Ollama 接続OK  利用可能モデル: {models}")
-            if self.model not in models:
-                print(f"[警告] モデル '{self.model}' が見つかりません。")
-                print(f"  → ollama pull {self.model}  を実行してください")
-        except requests.exceptions.ConnectionError:
-            raise ConnectionError(
-                f"Ollama に接続できません ({self.base_url})\n"
-                "Ollama が起動しているか確認してください: ollama serve"
-            )
- 
-    @staticmethod
-    def _strip_think_tags(text: str) -> str:
-        """
-        DeepSeek-R1 系モデルが出力する <think>...</think> ブロックを除去する。
-        入れ子になっている場合も考慮して貪欲でなく全体を除去する。
-        """
-        # DOTALL フラグで改行を含む複数行の <think> ブロックに対応
-        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        return cleaned.strip()
- 
+
     def refine(self, raw_text: str) -> str:
         """
-        音声認識テキストを整形して返す。
- 
+        音声認識テキストからフィラーを除去して返す。
+
         Parameters
         ----------
         raw_text : str
             faster-whisper が出力した生テキスト
- 
+
         Returns
         -------
         str
-            整形済みテキスト
+            フィラー除去済みテキスト
         """
         if not raw_text.strip():
             return ""
- 
-        prompt = REFINE_USER_TEMPLATE.format(raw_text=raw_text)
- 
-        payload = {
-            "model": self.model,
-            "system": REFINE_SYSTEM_PROMPT,
-            "prompt": prompt,
-            "stream": False,    # stream=True にすると逐次出力可能 (Step 5 で検討)
-            "options": {
-                "temperature": 0.3,   # 低めで安定した出力を得る
-                "top_p": 0.9,
-            },
-        }
- 
-        print(f"[Refiner] Ollama API 呼び出し中 (model={self.model}) ...")
- 
-        try:
-            resp = requests.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-        except requests.exceptions.Timeout:
-            raise TimeoutError(f"Ollama API がタイムアウトしました ({self.timeout}秒)")
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Ollama API エラー: {e}")
- 
-        raw_response = resp.json().get("response", "")
-        refined = self._strip_think_tags(raw_response)
- 
+
+        text = raw_text
+
+        # フィラーパターンを順番に適用
+        for pattern in _COMPILED_PATTERNS:
+            text = pattern.sub('', text)
+
+        # 連続スペース・全角スペースを半角スペース1つに正規化
+        text = re.sub(r'[\s\u3000]+', ' ', text)
+        text = text.strip()
+
         print(f"[Refiner] 整形前:\n  → {raw_text!r}")
-        print(f"[Refiner] 整形後:\n  → {refined!r}")
- 
-        return refined
- 
-    def is_available(self) -> bool:
-        """Ollama が利用可能かどうかを確認する (例外なし版)"""
-        try:
-            requests.get(f"{self.base_url}/api/tags", timeout=3)
-            return True
-        except Exception:
-            return False
- 
- 
+        print(f"[Refiner] 整形後:\n  → {text!r}")
+
+        return text
+
+
 # ─────────────────────────────────────
 # 単体テスト用エントリポイント
 # ─────────────────────────────────────
 def _test_interactive():
     """対話形式でテキスト整形をテストする"""
-    refiner = OllamaRefiner()
- 
+    refiner = RuleBasedRefiner()
+
     test_cases = [
         "えーっとですね、あのー、今日の会議なんですけど、まあ、あのー、3時からに変更になったっていう感じです",
         "なんか、そのー、プロジェクトの進捗がですね、えっと、少し遅れてるんですが、まあ来週中には完成する予定です",
         "あのー、田中さんに、えーと、資料を送っておいてもらえますか、なんか明日の朝までに",
+        "どのくらいの精度が出るか試してみたいと思います 結構長く喋るけどちゃんと変換できるかテストです どうかなやってみて",
     ]
- 
+
     print("\n" + "="*50)
-    print("テキスト整形テスト")
+    print("テキスト整形テスト (ルールベース)")
     print("="*50)
- 
+
     for i, raw in enumerate(test_cases, 1):
         print(f"\n--- テストケース {i} ---")
         refined = refiner.refine(raw)
         print(f"入力: {raw}")
         print(f"出力: {refined}")
- 
+
     # インタラクティブ入力モード
     print("\n" + "="*50)
     print("カスタムテキストを入力してください (空行で終了):")
@@ -186,7 +136,7 @@ def _test_interactive():
             break
         result = refiner.refine(text)
         print(f"→ {result}\n")
- 
- 
+
+
 if __name__ == "__main__":
     _test_interactive()

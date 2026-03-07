@@ -3,7 +3,8 @@ AirType - Step 2: Kotoba-Whisper (faster-whisper) による音声→テキスト
 
 設計:
 - WhisperTranscriber クラスで faster-whisper をラップ
-- モデル: kotoba-tech/kotoba-whisper-v2.2-faster (日本語特化・高精度)
+- モデル: kotoba-tech/kotoba-whisper-v2.0-faster (日本語特化・高精度)
+  - kotoba-tech 公式 CTranslate2 変換済みモデル
   - 初回起動時に HuggingFace Hub から自動ダウンロード (~/.cache/huggingface)
   - CTranslate2 形式で変換済みのため faster-whisper で直接利用可能
 - AMD GPU (ROCm) / NVIDIA GPU (CUDA) / CPU を自動選択
@@ -24,9 +25,9 @@ from faster_whisper import WhisperModel
 # ─────────────────────────────────────
 # 定数
 # ─────────────────────────────────────
-# Kotoba-Whisper v2.2 (CTranslate2変換済み・faster-whisper対応)
+# Kotoba-Whisper v2.0 (kotoba-tech 公式 CTranslate2変換済み・faster-whisper対応)
 # large-v3 ベースの日本語特化モデル。標準 large-v3 より高精度。
-KOTOBA_MODEL_ID = "kotoba-tech/kotoba-whisper-v2.2-faster"
+KOTOBA_MODEL_ID = "kotoba-tech/kotoba-whisper-v2.0-faster"
 
 # フォールバック: HuggingFace にアクセスできない場合は standard Whisper を使用
 FALLBACK_MODEL_SIZE = "large-v3"

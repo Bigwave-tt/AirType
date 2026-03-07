@@ -59,7 +59,7 @@ class WhisperTranscriber:
         self,
         language: Optional[str] = DEFAULT_LANGUAGE,
         device: str = "auto",
-        use_kotoba: bool = True,
+        use_kotoba: bool = False,
     ):
         self.language = language
 
@@ -69,12 +69,21 @@ class WhisperTranscriber:
         print(f"[Transcriber] モデル読み込み中: {model_id}")
         print(f"[Transcriber] device={actual_device}  compute={compute_type}")
 
-        self.model = WhisperModel(
-            model_id,
-            device=actual_device,
-            compute_type=compute_type,
-        )
+        if use_kotoba:
+            self.model = self._load_with_fallback(model_id, actual_device, compute_type)
+        else:
+            self.model = WhisperModel(model_id, device=actual_device, compute_type=compute_type)
         print("[Transcriber] モデル準備完了")
+
+    @staticmethod
+    def _load_with_fallback(model_id: str, device: str, compute_type: str) -> WhisperModel:
+        """Kotoba-Whisper のロードを試み、失敗時は large-v3 にフォールバックする。"""
+        try:
+            return WhisperModel(model_id, device=device, compute_type=compute_type)
+        except Exception as e:
+            print(f"[Transcriber] Kotoba-Whisper ロード失敗: {e}")
+            print(f"[Transcriber] large-v3 にフォールバックします")
+            return WhisperModel(FALLBACK_MODEL_SIZE, device=device, compute_type=compute_type)
 
     @staticmethod
     def _resolve_device(device: str) -> tuple[str, str]:

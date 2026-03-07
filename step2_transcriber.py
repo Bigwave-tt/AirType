@@ -30,7 +30,7 @@ from typing import Optional
 _HERE = Path(__file__).parent
 WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
 WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
-WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3-turbo-q8_0.bin"
+WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3-q5_0.bin"
 
 DEFAULT_LANGUAGE = "ja"
 
@@ -128,6 +128,7 @@ class WhisperTranscriber:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=120,  # 2分でタイムアウト（ハング防止）
         )
 
         if result.returncode != 0:

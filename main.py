@@ -148,11 +148,14 @@ class AirType:
     def _worker_loop(self):
         """LISTENING 中はキューを監視し、WAV が届いたら処理する。"""
         while True:
-            wav_path = self._audio_queue.get()
-            if wav_path is _SENTINEL:
-                print("[Worker] 停止")
-                break
-            self._run_pipeline(wav_path)
+            try:
+                wav_path = self._audio_queue.get()
+                if wav_path is _SENTINEL:
+                    print("[Worker] 停止")
+                    break
+                self._run_pipeline(wav_path)
+            except Exception as e:
+                print(f"[Worker] 予期しないエラー（処理を続行します）: {e}")
 
     # ── VAD コールバック ──────────────────
     def _on_audio_ready(self, wav_path: Path):

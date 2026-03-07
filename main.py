@@ -68,7 +68,7 @@ class AirType:
 
         # 各モジュール初期化
         self.recorder = Recorder()
-        self.transcriber = WhisperTranscriber()
+        self.transcriber = WhisperTranscriber(use_kotoba=True)
         self.refiner = RuleBasedRefiner()
         self.paster = Paster()
 

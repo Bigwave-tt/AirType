@@ -14,6 +14,8 @@ AirType - メインスクリプト (全モジュール統合)
   PROCESSING 中の再トリガーは無視する (二重実行防止)
 """
 
+import signal
+import sys
 import threading
 import time
 from enum import Enum, auto
@@ -78,7 +80,7 @@ class AirType:
         print("\n" + "=" * 50)
         print("  AirType 起動完了")
         print(f"  ホットキー: Ctrl + Shift + Space")
-        print(f"  終了: Ctrl + C")
+        print(f"  終了: Ctrl + C を2回")
         print("=" * 50 + "\n")
 
     # ── キー正規化 ────────────────────────
@@ -97,9 +99,6 @@ class AirType:
     # ── ホットキーイベント ────────────────
     def _on_press(self, key):
         self._pressed_keys.add(key)
-        if key == keyboard.KeyCode(char='\x03'):  # Ctrl+C
-            print("\n[AirType] 終了します")
-            return False
         if self._is_hotkey():
             self._handle_toggle()
 
@@ -200,10 +199,22 @@ class AirType:
 # ─────────────────────────────────────
 def main():
     app = AirType()
+    _last_ctrl_c = [0.0]
+
+    def _on_sigint(signum, frame):
+        now = time.time()
+        if now - _last_ctrl_c[0] < 2.0:
+            print("\n[AirType] 終了します")
+            sys.exit(0)
+        _last_ctrl_c[0] = now
+        print("\n[AirType] もう一度 Ctrl+C を押すと終了します (2秒以内)")
+
+    signal.signal(signal.SIGINT, _on_sigint)
+
     try:
         app.run()
-    except KeyboardInterrupt:
-        print("\n[AirType] 終了します")
+    except SystemExit:
+        pass
 
 
 if __name__ == "__main__":

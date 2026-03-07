@@ -191,7 +191,8 @@ class AirType:
             on_press=self._on_press,
             on_release=self._on_release,
         ) as listener:
-            listener.join()
+            while listener.running:
+                time.sleep(0.1)  # 短いスリープで SIGINT を受け付ける
 
 
 # ─────────────────────────────────────

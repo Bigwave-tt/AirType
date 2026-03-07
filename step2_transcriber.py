@@ -34,6 +34,16 @@ WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3.bin"
 
 DEFAULT_LANGUAGE = "ja"
 
+# whisper.cpp の --prompt に渡す初期文脈テキスト
+# 技術用語を事前提示することで同音異義語の誤認識を軽減する
+# 例: 「軌道」→「起動」、「記録」→「録音」 等
+INITIAL_PROMPT = (
+    "AirTypeは音声入力ツールです。"
+    "起動、録音、文字起こし、整形、ペースト、GPU、Vulkan、モデル、"
+    "プログラム、コード、変換、認識、処理、設定、実行、停止、"
+    "ファイル、フォルダ、パス、ダウンロード、インストール。"
+)
+
 # タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
 
@@ -101,6 +111,7 @@ class WhisperTranscriber:
             "-m", str(WHISPER_MODEL),
             "-f", str(wav_path),
             "-l", self.language or "auto",
+            "--prompt", INITIAL_PROMPT,  # 技術用語の同音異義語誤認識を軽減
             "--no-prints",   # 進捗ログを抑制
         ]
 

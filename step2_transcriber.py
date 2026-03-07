@@ -1,12 +1,18 @@
 """
-AirType - Step 2: faster-whisper による音声→テキスト変換
+AirType - Step 2: Kotoba-Whisper (faster-whisper) による音声→テキスト変換
 
 設計:
 - WhisperTranscriber クラスで faster-whisper をラップ
-- モデルは初回起動時にダウンロード・キャッシュされる (~/.cache/huggingface)
-- GPU (CUDA) があれば自動利用、なければ CPU にフォールバック
+- モデル: kotoba-tech/kotoba-whisper-v2.2-faster (日本語特化・高精度)
+  - 初回起動時に HuggingFace Hub から自動ダウンロード (~/.cache/huggingface)
+  - CTranslate2 形式で変換済みのため faster-whisper で直接利用可能
+- AMD GPU (ROCm) / NVIDIA GPU (CUDA) / CPU を自動選択
 - transcribe() は WAV ファイルパスを受け取りテキスト文字列を返す
 - 単体テスト: このファイルを直接実行すると Step 1 の Recorder と連携して動作確認できる
+
+AMD RX 6600 (ROCm) セットアップ:
+  Linux:   pip install ctranslate2  # ROCm ビルド済みホイールを使用
+  Windows: ROCm 5.7+ が必要。pip install torch --index-url https://download.pytorch.org/whl/rocm5.7
 """
 
 from pathlib import Path
@@ -18,7 +24,13 @@ from faster_whisper import WhisperModel
 # ─────────────────────────────────────
 # 定数
 # ─────────────────────────────────────
-DEFAULT_MODEL_SIZE = "small"   # tiny / base / small / medium / large-v3
+# Kotoba-Whisper v2.2 (CTranslate2変換済み・faster-whisper対応)
+# large-v3 ベースの日本語特化モデル。標準 large-v3 より高精度。
+KOTOBA_MODEL_ID = "kotoba-tech/kotoba-whisper-v2.2-faster"
+
+# フォールバック: HuggingFace にアクセスできない場合は standard Whisper を使用
+FALLBACK_MODEL_SIZE = "large-v3"
+
 DEFAULT_LANGUAGE = "ja"        # None にすると自動検出 (精度は下がる)
 COMPUTE_TYPE_GPU = "float16"   # GPU 使用時の量子化
 COMPUTE_TYPE_CPU = "int8"      # CPU 使用時の量子化 (速度優先)
@@ -29,52 +41,62 @@ COMPUTE_TYPE_CPU = "int8"      # CPU 使用時の量子化 (速度優先)
 # ─────────────────────────────────────
 class WhisperTranscriber:
     """
-    faster-whisper をラップして WAV → テキスト変換を行う。
+    Kotoba-Whisper (faster-whisper) をラップして WAV → テキスト変換を行う。
 
     Parameters
     ----------
-    model_size : str
-        使用するモデルサイズ ("tiny", "base", "small", "medium", "large-v3")
-        日本語の実用精度には "small" 以上を推奨。
     language : str | None
         文字起こし言語コード ("ja", "en", 等)。None で自動検出。
     device : str
-        "cuda" / "cpu" / "auto"。auto は CUDA 優先でフォールバック。
+        "cuda" / "cpu" / "auto"。
+        auto は CUDA (NVIDIA) → ROCm (AMD) → CPU の順でフォールバック。
+    use_kotoba : bool
+        True で Kotoba-Whisper v2.2-faster (日本語特化) を使用。
+        False で standard faster-whisper (large-v3) にフォールバック。
     """
 
     def __init__(
         self,
-        model_size: str = DEFAULT_MODEL_SIZE,
         language: Optional[str] = DEFAULT_LANGUAGE,
         device: str = "auto",
+        use_kotoba: bool = True,
     ):
         self.language = language
 
         actual_device, compute_type = self._resolve_device(device)
-        print(f"[Transcriber] モデル読み込み中: {model_size}  device={actual_device}  compute={compute_type}")
+        model_id = KOTOBA_MODEL_ID if use_kotoba else FALLBACK_MODEL_SIZE
+
+        print(f"[Transcriber] モデル読み込み中: {model_id}")
+        print(f"[Transcriber] device={actual_device}  compute={compute_type}")
 
         self.model = WhisperModel(
-            model_size,
+            model_id,
             device=actual_device,
             compute_type=compute_type,
         )
-        print(f"[Transcriber] モデル準備完了")
+        print("[Transcriber] モデル準備完了")
 
     @staticmethod
     def _resolve_device(device: str) -> tuple[str, str]:
         """
-        device="auto" のとき CUDA 利用可能なら GPU、なければ CPU を選択する。
+        device="auto" のとき CUDA/ROCm → CPU の順で選択する。
+        AMD ROCm は torch の CUDA インターフェース経由で検出できる。
         """
-        if device == "auto":
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    return "cuda", COMPUTE_TYPE_GPU
-            except ImportError:
-                pass
-            return "cpu", COMPUTE_TYPE_CPU
-        compute_type = COMPUTE_TYPE_GPU if device == "cuda" else COMPUTE_TYPE_CPU
-        return device, compute_type
+        if device != "auto":
+            compute_type = COMPUTE_TYPE_GPU if device == "cuda" else COMPUTE_TYPE_CPU
+            return device, compute_type
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                # NVIDIA CUDA または AMD ROCm (HIP) が利用可能
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"[Transcriber] GPU 検出: {gpu_name}")
+                return "cuda", COMPUTE_TYPE_GPU
+        except ImportError:
+            pass
+
+        return "cpu", COMPUTE_TYPE_CPU
 
     def transcribe(self, wav_path: Path) -> str:
         """
@@ -88,7 +110,7 @@ class WhisperTranscriber:
         Returns
         -------
         str
-            結合された文字起こしテキスト (セグメント間をスペースで連結)
+            結合された文字起こしテキスト
         """
         if not wav_path.exists():
             raise FileNotFoundError(f"WAV ファイルが見つかりません: {wav_path}")
@@ -101,13 +123,12 @@ class WhisperTranscriber:
             beam_size=5,
             temperature=0,                      # 決定的出力 (ハルシネーション抑制)
             condition_on_previous_text=False,   # 前セグメントの影響を排除
-            vad_filter=True,           # 無音部分をスキップして精度向上
+            vad_filter=True,                    # 無音部分をスキップして精度向上
             vad_parameters={
-                "min_silence_duration_ms": 500,  # 500ms 以上の無音をカット
+                "min_silence_duration_ms": 500,
             },
         )
 
-        # セグメントはジェネレータなので list 化してから結合
         segment_texts = [seg.text.strip() for seg in segments]
         full_text = " ".join(segment_texts)
 
@@ -121,11 +142,6 @@ class WhisperTranscriber:
 # 単体テスト用エントリポイント
 # ─────────────────────────────────────
 def _test_with_recorder():
-    """
-    Step 1 の Recorder と組み合わせて動作確認する。
-    Ctrl+Shift+Space で録音 → 停止 → 文字起こし を試せる。
-    """
-    # Step 1 のモジュールをインポート
     from step1_recorder import HotkeyController, Recorder
 
     transcriber = WhisperTranscriber()
@@ -137,7 +153,6 @@ def _test_with_recorder():
             print(f"文字起こし完了: {text}")
             print(f"{'='*40}\n")
         finally:
-            # 確認後にファイルを削除
             wav_path.unlink(missing_ok=True)
             print(f"[cleanup] 一時ファイルを削除: {wav_path}")
 
@@ -151,7 +166,6 @@ def _test_with_recorder():
 
 
 def _test_with_existing_file(wav_path: str):
-    """既存の WAV ファイルで文字起こしをテストする"""
     transcriber = WhisperTranscriber()
     text = transcriber.transcribe(Path(wav_path))
     print(f"\n結果: {text}")
@@ -161,8 +175,6 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1:
-        # 引数に WAV ファイルパスが指定された場合はそのファイルをテスト
         _test_with_existing_file(sys.argv[1])
     else:
-        # 引数なしの場合はリアルタイム録音テスト
         _test_with_recorder()

@@ -8,6 +8,16 @@ numpy>=1.24.0          # 録音バッファ処理
 
 # ─── Step 2: 音声認識 ────────────────────────────────
 faster-whisper>=1.0.0  # Whisper の高速実装 (CTranslate2 ベース)
+huggingface-hub>=0.20.0  # Kotoba-Whisper モデルのダウンロードに必要
+# モデル: kotoba-tech/kotoba-whisper-v2.2-faster (初回起動時に自動DL, 約3GB)
+#
+# ─── AMD GPU (RX 6600) ROCm セットアップ ────────────
+# Linux (ROCm 6.x):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
+# Windows (ROCm 5.7+):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/rocm5.7
+# NVIDIA (CUDA):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # ─── Step 3: LLM 整形 ────────────────────────────────
 requests>=2.31.0       # Ollama REST API 呼び出し

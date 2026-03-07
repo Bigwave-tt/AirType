@@ -32,7 +32,7 @@ from step4_paster import Paster
 # ─────────────────────────────────────
 # 設定
 # ─────────────────────────────────────
-WHISPER_MODEL = "large-v3"        # tiny / base / small / medium / large-v3
+# モデルは step2_transcriber.py 内の KOTOBA_MODEL_ID で管理 (Kotoba-Whisper v2.2-faster)
 HOTKEY = {
     keyboard.Key.ctrl_l,
     keyboard.Key.shift,
@@ -68,7 +68,7 @@ class AirType:
 
         # 各モジュール初期化
         self.recorder = Recorder()
-        self.transcriber = WhisperTranscriber(model_size=WHISPER_MODEL)
+        self.transcriber = WhisperTranscriber()
         self.refiner = RuleBasedRefiner()
         self.paster = Paster()
 

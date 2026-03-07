@@ -99,6 +99,8 @@ class WhisperTranscriber:
             str(wav_path),
             language=self.language,
             beam_size=5,
+            temperature=0,                      # 決定的出力 (ハルシネーション抑制)
+            condition_on_previous_text=False,   # 前セグメントの影響を排除
             vad_filter=True,           # 無音部分をスキップして精度向上
             vad_parameters={
                 "min_silence_duration_ms": 500,  # 500ms 以上の無音をカット

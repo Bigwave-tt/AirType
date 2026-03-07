@@ -30,7 +30,7 @@ from step4_paster import Paster
 # ─────────────────────────────────────
 # 設定
 # ─────────────────────────────────────
-WHISPER_MODEL = "small"           # tiny / base / small / medium / large-v3
+WHISPER_MODEL = "medium"          # tiny / base / small / medium / large-v3
 OLLAMA_MODEL = "deepseek-r1:7b"   # ollama pull deepseek-r1:7b で取得
 HOTKEY = {
     keyboard.Key.ctrl_l,
@@ -149,6 +149,9 @@ class AirType:
             if not refined_text.strip():
                 print("[AirType] LLM が空のテキストを返しました。生テキストを使用します")
                 refined_text = raw_text
+            elif self._is_ascii_dominant(refined_text) and not self._is_ascii_dominant(raw_text):
+                print("[AirType] LLM が英語に変換しました。生テキストを使用します")
+                refined_text = raw_text
 
             # 4. アクティブウィンドウへペースト
             self.paster.paste(refined_text)
@@ -170,6 +173,15 @@ class AirType:
             self._log_state("PROCESSING → IDLE")
 
     # ── ユーティリティ ─────────────────────
+    @staticmethod
+    def _is_ascii_dominant(text: str) -> bool:
+        """テキストの大半がASCII文字（英語など）かどうかを判定する"""
+        if not text:
+            return False
+        ascii_count = sum(1 for c in text if ord(c) < 128 and c.isalpha())
+        total_alpha = sum(1 for c in text if c.isalpha())
+        return total_alpha > 0 and (ascii_count / total_alpha) > 0.8
+
     @staticmethod
     def _log_state(transition: str):
         print(f"[状態] {transition}")

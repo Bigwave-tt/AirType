@@ -1,226 +1,158 @@
 """
-AirType - Step 1: ホットキー検知 + 録音開始/停止 + 一時ファイル保存
- 
+AirType v2 - Step 1: WebRTC VAD による自動発話検出・録音
+
 設計:
-- pynput でグローバルホットキー (Ctrl+Shift+Space) を監視
-- 状態マシン: IDLE → RECORDING → IDLE
-- sounddevice でマイク入力をキャプチャ (別スレッド)
-- 録音データを WAV 形式で tempfile に保存
-- メインスレッドは常にホットキー監視を維持する
+- sounddevice で 16kHz/16bit/mono を常時監視
+- webrtcvad で 30ms フレームごとに声/無音を判定
+- 発話が N フレーム連続 → 録音開始
+- 無音が M フレーム連続 → 録音停止 → WAV 保存 → コールバック呼び出し
+- ホットキーは「監視モードのON/OFF」に役割変更（録音の開始/停止は自動）
 """
- 
-import wave
+
+import collections
 import tempfile
 import threading
-import time
-from enum import Enum, auto
+import wave
 from pathlib import Path
- 
+from typing import Callable, Optional
+
 import numpy as np
 import sounddevice as sd
-from pynput import keyboard
- 
- 
+import webrtcvad
+
+
 # ─────────────────────────────────────
 # 定数
 # ─────────────────────────────────────
-SAMPLE_RATE = 16000       # Whisper が期待するサンプルレート (16kHz)
-CHANNELS = 1              # モノラル
-DTYPE = "int16"           # 16bit PCM
-HOTKEY = {keyboard.Key.ctrl_l, keyboard.Key.shift, keyboard.KeyCode(char=" ")}
-# ※ OS・キーボードレイアウトにより ctrl_r / shift_r を追加する場合は HOTKEY を拡張
- 
- 
+SAMPLE_RATE = 16000          # webrtcvad の要件 (8000 / 16000 / 32000 / 48000)
+FRAME_MS = 30                # フレーム長: 10 / 20 / 30 ms のいずれか
+FRAME_SAMPLES = int(SAMPLE_RATE * FRAME_MS / 1000)  # 480 samples
+
+VAD_AGGRESSIVENESS = 2       # 0(緩) 〜 3(厳)
+
+SPEECH_START_FRAMES = 3      # 録音開始に必要な連続発話フレーム数 (= 90ms)
+SILENCE_END_FRAMES = 33      # 録音終了に必要な連続無音フレーム数 (= 990ms ≈ 1秒)
+PRE_BUFFER_FRAMES = 10       # 発話開始前のプリバッファ (= 300ms、頭切れを防ぐ)
+MIN_SPEECH_FRAMES = 10       # 最低発話長: これ未満はノイズとしてスキップ (= 300ms)
+
+
 # ─────────────────────────────────────
-# 状態定義
+# VADRecorder クラス
 # ─────────────────────────────────────
-class State(Enum):
-    IDLE = auto()
-    RECORDING = auto()
- 
- 
-# ─────────────────────────────────────
-# Recorder クラス
-# ─────────────────────────────────────
-class Recorder:
+class VADRecorder:
     """
-    sounddevice の InputStream を使って非同期録音を行う。
-    start() で録音開始、stop() で停止して WAV ファイルを返す。
+    WebRTC VAD を使い、発話区間を自動検出して WAV 保存するクラス。
+
+    使い方:
+        def on_ready(wav_path: Path):
+            text = transcriber.transcribe(wav_path)
+
+        recorder = VADRecorder(on_audio_ready=on_ready)
+        recorder.start_listening()   # 監視開始
+        ...
+        recorder.stop_listening()    # 監視停止
+
+    Parameters
+    ----------
+    on_audio_ready : Callable[[Path], None]
+        発話区間が確定するたびに呼ばれるコールバック。
+        WAV ファイルのパスを受け取る。呼び出し元で削除すること。
+    aggressiveness : int
+        VAD の感度 (0=緩い, 3=厳しい)。デフォルト 2。
     """
- 
-    def __init__(self, sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS):
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self._frames: list[np.ndarray] = []
-        self._stream: sd.InputStream | None = None
-        self._lock = threading.Lock()
- 
-    def _callback(self, indata: np.ndarray, frames: int, time_info, status):
-        """sounddevice のコールバック: 録音バッファを蓄積する"""
-        if status:
-            print(f"[警告] sounddevice status: {status}")
-        with self._lock:
-            self._frames.append(indata.copy())
- 
-    def start(self):
-        """録音を開始する"""
-        with self._lock:
-            self._frames.clear()
- 
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype=DTYPE,
-            callback=self._callback,
+
+    def __init__(
+        self,
+        on_audio_ready: Callable[[Path], None],
+        aggressiveness: int = VAD_AGGRESSIVENESS,
+    ):
+        self._vad = webrtcvad.Vad(aggressiveness)
+        self._on_audio_ready = on_audio_ready
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+        print(
+            f"[VAD] 設定: aggressiveness={aggressiveness}, "
+            f"開始={SPEECH_START_FRAMES}フレーム({SPEECH_START_FRAMES * FRAME_MS}ms), "
+            f"終了={SILENCE_END_FRAMES}フレーム({SILENCE_END_FRAMES * FRAME_MS}ms)"
         )
-        self._stream.start()
-        print("[Recorder] 録音開始")
- 
-    def stop(self) -> Path:
-        """
-        録音を停止し、WAV ファイルに保存して Path を返す。
-        ファイルは tempfile で作成され、呼び出し元が削除責任を持つ。
-        """
-        if self._stream is None:
-            raise RuntimeError("録音が開始されていません")
- 
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
- 
-        with self._lock:
-            frames = self._frames.copy()
- 
-        if not frames:
-            raise RuntimeError("録音データが空です")
- 
-        audio_data = np.concatenate(frames, axis=0)
- 
-        # tempfile: delete=False で呼び出し元が後片付けする設計
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        tmp_path = Path(tmp.name)
-        tmp.close()
- 
-        with wave.open(str(tmp_path), "wb") as wf:
-            wf.setnchannels(self.channels)
-            wf.setsampwidth(2)  # int16 = 2 bytes
-            wf.setframerate(self.sample_rate)
-            wf.writeframes(audio_data.tobytes())
- 
-        print(f"[Recorder] 録音停止 → 保存: {tmp_path}  ({len(audio_data) / self.sample_rate:.1f}秒)")
-        return tmp_path
- 
- 
-# ─────────────────────────────────────
-# HotkeyController クラス
-# ─────────────────────────────────────
-class HotkeyController:
-    """
-    pynput を使ってグローバルホットキーを監視し、
-    状態マシンに従って Recorder を制御する。
- 
-    状態遷移:
-        IDLE       --[ホットキー]--> RECORDING
-        RECORDING  --[ホットキー]--> IDLE (録音停止 + 保存)
-    """
- 
-    def __init__(self, recorder: Recorder, on_recorded=None):
-        self.recorder = recorder
-        self.on_recorded = on_recorded  # 録音完了時のコールバック (Path を受け取る)
-        self.state = State.IDLE
-        self._pressed_keys: set = set()
-        self._state_lock = threading.Lock()
- 
-    # ── キー正規化 ────────────────────────────
-    @staticmethod
-    def _normalize(key) -> object:
-        """
-        左右修飾キーを区別しない正規化。
-        例: Key.ctrl_r → Key.ctrl_l
-        """
-        _map = {
-            keyboard.Key.ctrl_r: keyboard.Key.ctrl_l,
-            keyboard.Key.shift_r: keyboard.Key.shift,
-            keyboard.Key.alt_r: keyboard.Key.alt,
-        }
-        return _map.get(key, key)
- 
-    # ── ホットキー判定 ────────────────────────
-    def _is_hotkey(self) -> bool:
-        normalized = {self._normalize(k) for k in self._pressed_keys}
-        return HOTKEY.issubset(normalized)
- 
-    # ── イベントハンドラ ──────────────────────
-    def _on_press(self, key):
-        self._pressed_keys.add(key)
-        if self._is_hotkey():
-            self._handle_toggle()
- 
-    def _on_release(self, key):
-        self._pressed_keys.discard(key)
- 
-    # ── 状態遷移 ──────────────────────────────
-    def _handle_toggle(self):
-        with self._state_lock:
-            if self.state == State.IDLE:
-                self.state = State.RECORDING
-                print("[状態] IDLE → RECORDING")
-                # 録音は別スレッドで開始 (メインの監視ループをブロックしない)
-                threading.Thread(target=self.recorder.start, daemon=True).start()
- 
-            elif self.state == State.RECORDING:
-                self.state = State.IDLE
-                print("[状態] RECORDING → IDLE")
-                # 録音停止・保存・コールバック呼び出しも別スレッドで
-                threading.Thread(target=self._stop_and_callback, daemon=True).start()
- 
-    def _stop_and_callback(self):
-        try:
-            wav_path = self.recorder.stop()
-            if self.on_recorded:
-                self.on_recorded(wav_path)
-        except Exception as e:
-            print(f"[エラー] 録音停止中に例外: {e}")
-            with self._state_lock:
-                self.state = State.IDLE
- 
-    # ── リスナー起動 ──────────────────────────
+
     def start_listening(self):
-        print(f"[HotkeyController] 監視開始 (Ctrl+Shift+Space で録音トグル)")
-        print("[HotkeyController] 終了するには Ctrl+C を押してください")
-        with keyboard.Listener(
-            on_press=self._on_press,
-            on_release=self._on_release,
-        ) as listener:
-            listener.join()
- 
- 
-# ─────────────────────────────────────
-# Step 1 の動作確認用エントリポイント
-# ─────────────────────────────────────
-def on_recorded(wav_path: Path):
-    """
-    Step 1 では録音完了後にファイル情報を表示するだけ。
-    Step 2 以降でこのコールバックに STT 処理を追加する。
-    """
-    print(f"[on_recorded] WAV 保存完了: {wav_path}")
-    print(f"  ファイルサイズ: {wav_path.stat().st_size / 1024:.1f} KB")
-    print("  ※ Step 2 で STT 処理に渡されます")
- 
-    # Step 1 では後片付けをここで実施 (Step 5 統合後はパイプラインで削除)
-    # wav_path.unlink()  # ← 動作確認のためコメントアウト
- 
- 
-def main():
-    recorder = Recorder()
-    controller = HotkeyController(recorder=recorder, on_recorded=on_recorded)
- 
-    try:
-        controller.start_listening()
-    except KeyboardInterrupt:
-        print("\n[main] 終了します")
- 
- 
-if __name__ == "__main__":
-    main()
- 
+        """マイク監視ループをバックグラウンドスレッドで開始する。"""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        print("[VAD] 監視開始 → 話しかけてください")
+
+    def stop_listening(self):
+        """マイク監視ループを停止する。"""
+        self._running = False
+        print("[VAD] 監視停止")
+
+    # ── 内部ループ ──────────────────────────────────────────
+    def _loop(self):
+        """sounddevice ストリームを読みながら VAD で発話を検出するメインループ。"""
+        pre_buffer: collections.deque = collections.deque(maxlen=PRE_BUFFER_FRAMES)
+        recording: list[np.ndarray] = []
+        speech_run = 0    # 連続発話フレーム数
+        silence_run = 0   # 連続無音フレーム数
+        in_speech = False
+
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=FRAME_SAMPLES,
+        ) as stream:
+            while self._running:
+                frame, _ = stream.read(FRAME_SAMPLES)
+                is_speech = self._vad.is_speech(frame.tobytes(), SAMPLE_RATE)
+
+                if not in_speech:
+                    # ── 待機中: プリバッファを維持しつつ発話開始を待つ ──
+                    pre_buffer.append(frame.copy())
+                    speech_run = speech_run + 1 if is_speech else 0
+
+                    if speech_run >= SPEECH_START_FRAMES:
+                        in_speech = True
+                        silence_run = 0
+                        recording = list(pre_buffer)
+                        print("[VAD] 発話開始 ▶")
+
+                else:
+                    # ── 録音中: フレームを蓄積しつつ無音終了を待つ ──
+                    recording.append(frame.copy())
+                    silence_run = silence_run + 1 if not is_speech else 0
+
+                    if silence_run >= SILENCE_END_FRAMES:
+                        in_speech = False
+                        speech_run = 0
+                        duration_s = len(recording) * FRAME_MS / 1000
+                        print(f"[VAD] 発話終了 ■ ({duration_s:.1f}秒)")
+
+                        if len(recording) >= MIN_SPEECH_FRAMES:
+                            wav_path = self._save_wav(recording)
+                            threading.Thread(
+                                target=self._on_audio_ready,
+                                args=(wav_path,),
+                                daemon=True,
+                            ).start()
+                        else:
+                            print("[VAD] 発話が短すぎるためスキップ")
+
+                        recording = []
+                        silence_run = 0
+
+    @staticmethod
+    def _save_wav(frames: list[np.ndarray]) -> Path:
+        """フレームリストを 16kHz/16bit/mono WAV として一時ファイルに保存する。"""
+        audio = np.concatenate(frames, axis=0)
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        with wave.open(tmp.name, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)       # 16-bit
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio.tobytes())
+        return Path(tmp.name)

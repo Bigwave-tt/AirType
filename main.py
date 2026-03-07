@@ -1,17 +1,21 @@
 """
-AirType - メインスクリプト (全モジュール統合)
+AirType v2 - メインスクリプト (VAD 自動録音)
 
 データフロー:
-  [ホットキー] → 録音開始
-  [ホットキー] → 録音停止 → STT (faster-whisper) → 整形 (Ollama) → ペースト
+  [ホットキー] → 監視モード ON
+  [マイク] → VAD が発話検出 → 自動録音 → STT (whisper.cpp) → ペースト
+  [ホットキー] → 監視モード OFF
 
 状態マシン:
-  IDLE → RECORDING → PROCESSING → IDLE
+  IDLE       : VAD 停止中 (ホットキーで LISTENING へ)
+  LISTENING  : VAD 監視中、発話を待機 (発話終了で自動的に PROCESSING へ)
+  PROCESSING : STT + ペースト実行中 (完了で LISTENING へ戻る)
 
 スレッドモデル:
   メインスレッド : pynput ホットキー監視 (常時稼働)
-  ワーカースレッド: 録音 / STT / LLM / ペースト (トリガー毎に起動)
-  PROCESSING 中の再トリガーは無視する (二重実行防止)
+  VAD スレッド  : マイク監視・発話検出 (LISTENING 中に常時稼働)
+  ワーカースレッド: STT / ペースト (発話検出のたびに起動)
+  ※ PROCESSING 中に新たな発話が終了しても、そのブロックはスキップする
 """
 
 import signal
@@ -23,7 +27,7 @@ from pathlib import Path
 
 from pynput import keyboard
 
-from step1_recorder import Recorder
+from step1_recorder import VADRecorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import RuleBasedRefiner
 from step4_paster import Paster
@@ -32,7 +36,6 @@ from step4_paster import Paster
 # ─────────────────────────────────────
 # 設定
 # ─────────────────────────────────────
-# モデルは step2_transcriber.py 内の KOTOBA_MODEL_ID で管理 (Kotoba-Whisper v2.2-faster)
 HOTKEY = {
     keyboard.Key.ctrl_l,
     keyboard.Key.shift,
@@ -45,7 +48,7 @@ HOTKEY = {
 # ─────────────────────────────────────
 class State(Enum):
     IDLE = auto()
-    RECORDING = auto()
+    LISTENING = auto()
     PROCESSING = auto()
 
 
@@ -54,23 +57,22 @@ class State(Enum):
 # ─────────────────────────────────────
 class AirType:
     """
-    AirType の全処理を統合・管理するクラス。
+    AirType v2 の全処理を統合・管理するクラス。
 
-    - ホットキー検知 → 状態遷移
-    - 録音 → STT → LLM 整形 → ペースト のパイプライン実行
-    - エラー発生時は IDLE に戻してリトライ可能にする
+    - ホットキーで監視モード ON/OFF
+    - VAD が発話を自動検出 → STT → ペーストのパイプライン実行
     """
 
     def __init__(self):
         print("=" * 50)
-        print("  AirType を起動しています...")
+        print("  AirType v2 を起動しています...")
         print("=" * 50)
 
         # 各モジュール初期化
-        self.recorder = Recorder()
         self.transcriber = WhisperTranscriber(use_kotoba=True)
         self.refiner = RuleBasedRefiner()
         self.paster = Paster()
+        self.recorder = VADRecorder(on_audio_ready=self._on_audio_ready)
 
         # 状態管理
         self.state = State.IDLE
@@ -78,9 +80,10 @@ class AirType:
         self._pressed_keys: set = set()
 
         print("\n" + "=" * 50)
-        print("  AirType 起動完了")
-        print(f"  ホットキー: Ctrl + Shift + Space")
-        print(f"  終了: Ctrl + C を2回")
+        print("  AirType v2 起動完了")
+        print("  ホットキー: Ctrl+Shift+Space で監視 ON/OFF")
+        print("  話し終えると自動的に変換・ペーストされます")
+        print("  終了: Ctrl+C を2回")
         print("=" * 50 + "\n")
 
     # ── キー正規化 ────────────────────────
@@ -108,78 +111,70 @@ class AirType:
     # ── 状態遷移ハンドラ ──────────────────
     def _handle_toggle(self):
         with self._state_lock:
-            current = self.state
+            if self.state == State.IDLE:
+                self.state = State.LISTENING
+                self._log_state("IDLE → LISTENING")
+                self.recorder.start_listening()
 
-            if current == State.IDLE:
-                self.state = State.RECORDING
-                self._log_state("IDLE → RECORDING")
-                threading.Thread(target=self.recorder.start, daemon=True).start()
+            elif self.state == State.LISTENING:
+                self.state = State.IDLE
+                self._log_state("LISTENING → IDLE")
+                self.recorder.stop_listening()
 
-            elif current == State.RECORDING:
-                self.state = State.PROCESSING
-                self._log_state("RECORDING → PROCESSING")
-                threading.Thread(target=self._run_pipeline, daemon=True).start()
-
-            elif current == State.PROCESSING:
-                # 処理中の再トリガーは無視
+            elif self.state == State.PROCESSING:
                 print("[AirType] 処理中です。完了までお待ちください...")
 
+    # ── VAD コールバック ──────────────────
+    def _on_audio_ready(self, wav_path: Path):
+        """
+        VADRecorder から発話区間の WAV が届いたときに呼ばれる。
+        PROCESSING 中は新しい音声をスキップする。
+        """
+        with self._state_lock:
+            if self.state != State.LISTENING:
+                # IDLE または既に PROCESSING 中 → スキップ
+                if wav_path.exists():
+                    wav_path.unlink()
+                if self.state == State.PROCESSING:
+                    print("[AirType] 処理中のため今回の発話はスキップします")
+                return
+            self.state = State.PROCESSING
+            self._log_state("LISTENING → PROCESSING")
+
+        self._run_pipeline(wav_path)
+
     # ── パイプライン実行 ──────────────────
-    def _run_pipeline(self):
-        """
-        録音停止 → STT → LLM 整形 → ペースト を順に実行する。
-        エラーが発生した場合は状態を IDLE に戻す。
-        """
-        wav_path: Path | None = None
-
+    def _run_pipeline(self, wav_path: Path):
+        """STT → フィラー除去 → ペースト を順に実行する。"""
         try:
-            # 1. 録音停止・WAV 保存
-            wav_path = self.recorder.stop()
-
-            # 2. 音声認識 (STT)
+            # 1. 音声認識 (STT)
             raw_text = self.transcriber.transcribe(wav_path)
             if not raw_text.strip():
                 print("[AirType] 音声が認識されませんでした")
                 return
 
-            # 3. LLM によるテキスト整形
+            # 2. フィラー除去
             refined_text = self.refiner.refine(raw_text)
             if not refined_text.strip():
-                print("[AirType] LLM が空のテキストを返しました。生テキストを使用します")
-                refined_text = raw_text
-            elif self._is_ascii_dominant(refined_text) and not self._is_ascii_dominant(raw_text):
-                print("[AirType] LLM が英語に変換しました。生テキストを使用します")
                 refined_text = raw_text
 
-            # 4. アクティブウィンドウへペースト
+            # 3. アクティブウィンドウへペースト
             self.paster.paste(refined_text)
-
             print(f"\n[AirType] 完了: {refined_text!r}\n")
 
         except Exception as e:
             print(f"[AirType] エラー: {e}")
 
         finally:
-            # 一時ファイルの後片付け
-            if wav_path and wav_path.exists():
+            if wav_path.exists():
                 wav_path.unlink()
-                print(f"[AirType] 一時ファイルを削除: {wav_path.name}")
 
-            # 状態を IDLE に戻す
             with self._state_lock:
-                self.state = State.IDLE
-            self._log_state("PROCESSING → IDLE")
+                if self.state == State.PROCESSING:
+                    self.state = State.LISTENING
+                    self._log_state("PROCESSING → LISTENING")
 
     # ── ユーティリティ ─────────────────────
-    @staticmethod
-    def _is_ascii_dominant(text: str) -> bool:
-        """テキストの大半がASCII文字（英語など）かどうかを判定する"""
-        if not text:
-            return False
-        ascii_count = sum(1 for c in text if ord(c) < 128 and c.isalpha())
-        total_alpha = sum(1 for c in text if c.isalpha())
-        return total_alpha > 0 and (ascii_count / total_alpha) > 0.8
-
     @staticmethod
     def _log_state(transition: str):
         print(f"[状態] {transition}")
@@ -192,7 +187,7 @@ class AirType:
             on_release=self._on_release,
         ) as listener:
             while listener.running:
-                time.sleep(0.1)  # 短いスリープで SIGINT を受け付ける
+                time.sleep(0.1)
 
 
 # ─────────────────────────────────────

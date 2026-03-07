@@ -1,0 +1,29 @@
+# AirType - 依存パッケージ一覧
+# インストール: pip install -r requirements.txt
+
+# ─── Step 1: ホットキー検知 + 録音 ───────────────────
+pynput>=1.7.6          # グローバルホットキー監視 (root 不要)
+sounddevice>=0.4.6     # マイク録音 (PortAudio ラッパー)
+numpy>=1.24.0          # 録音バッファ処理
+
+# ─── Step 2: 音声認識 ────────────────────────────────
+faster-whisper>=1.0.0  # Whisper の高速実装 (CTranslate2 ベース)
+
+# ─── Step 3: LLM 整形 ────────────────────────────────
+requests>=2.31.0       # Ollama REST API 呼び出し
+
+# ─── Step 4: クリップボード + 自動ペースト ──────────
+pyperclip>=1.8.2       # クリップボード操作
+pyautogui>=0.9.54      # キーシミュレーション (Ctrl+V)
+
+# ─── 備考 ────────────────────────────────────────────
+# sounddevice は内部で PortAudio C ライブラリを使用します。
+# Linux: sudo apt install libportaudio2
+# macOS: brew install portaudio
+#
+# pyautogui は Linux で python3-xlib または python3-tk が必要です。
+# Linux: sudo apt install python3-xlib python3-tk
+#
+# Ollama は別途インストールが必要です:
+# https://ollama.ai/download
+# 起動後: ollama pull deepseek-r1:7b

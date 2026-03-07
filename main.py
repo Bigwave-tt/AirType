@@ -30,7 +30,7 @@ from step4_paster import Paster
 # ─────────────────────────────────────
 # 設定
 # ─────────────────────────────────────
-WHISPER_MODEL = "medium"          # tiny / base / small / medium / large-v3
+WHISPER_MODEL = "large-v3"        # tiny / base / small / medium / large-v3
 OLLAMA_MODEL = "deepseek-r1:7b"   # ollama pull deepseek-r1:7b で取得
 HOTKEY = {
     keyboard.Key.ctrl_l,

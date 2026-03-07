@@ -35,7 +35,7 @@ OLLAMA_MODEL = "deepseek-r1:7b"   # ollama pull deepseek-r1:7b で取得
 HOTKEY = {
     keyboard.Key.ctrl_l,
     keyboard.Key.shift,
-    keyboard.KeyCode(char=" "),
+    keyboard.Key.space,
 }
 
 
@@ -98,6 +98,7 @@ class AirType:
     # ── ホットキーイベント ────────────────
     def _on_press(self, key):
         self._pressed_keys.add(key)
+        print(f"[DEBUG] key={key!r}  pressed={self._pressed_keys!r}", flush=True)
         if self._is_hotkey():
             self._handle_toggle()
 

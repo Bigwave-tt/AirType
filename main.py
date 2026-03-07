@@ -139,17 +139,11 @@ class AirType:
         self._worker_thread.start()
 
     def _stop_worker(self):
-        """ワーカーに終了シグナルを送り、キューに残る WAV を破棄する。"""
+        """ワーカーに終了シグナルを送る。キューに残る WAV は処理してから停止する。"""
+        remaining = self._audio_queue.qsize()
+        if remaining > 0:
+            print(f"[Worker] 残り {remaining} 件を処理してから停止します")
         self._audio_queue.put(_SENTINEL)
-
-        # キューに残っている WAV ファイルを削除
-        while True:
-            try:
-                item = self._audio_queue.get_nowait()
-                if item is not None and item.exists():
-                    item.unlink()
-            except queue.Empty:
-                break
 
     def _worker_loop(self):
         """LISTENING 中はキューを監視し、WAV が届いたら処理する。"""

@@ -47,6 +47,13 @@ INITIAL_PROMPT = (
 # タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
 
+# whisper.cpp が出力するゴミトークンのパターン (短い音声や --prompt 時に発生)
+# 例: ≪≫、(無音)、[音楽]、[拍手] 等
+_NOISE_RE = re.compile(
+    r"[≪≫《》【】\[\(（]"      # 括弧類で始まるトークン
+    r"|^\s*[\(\[（【][^\)\]）】]*[\)\]）】]\s*$"  # 行全体が括弧で囲まれている
+)
+
 
 # ─────────────────────────────────────
 # WhisperTranscriber クラス
@@ -146,7 +153,7 @@ class WhisperTranscriber:
             m = _TIMESTAMP_RE.match(line.strip())
             if m:
                 text = m.group(1).strip()
-                if text:
+                if text and not _NOISE_RE.search(text):
                     texts.append(text)
 
         return "".join(texts)

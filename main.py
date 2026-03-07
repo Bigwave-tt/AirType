@@ -1,23 +1,24 @@
 """
-AirType v2 - メインスクリプト (VAD 自動録音)
+AirType v2 - メインスクリプト (VAD 自動録音 + キューによる連続処理)
 
 データフロー:
   [ホットキー] → 監視モード ON
-  [マイク] → VAD が発話検出 → 自動録音 → STT (whisper.cpp) → ペースト
+  [マイク] → VAD が発話検出 → Queue に追加 → Worker が順に STT → ペースト
   [ホットキー] → 監視モード OFF
 
 状態マシン:
-  IDLE       : VAD 停止中 (ホットキーで LISTENING へ)
-  LISTENING  : VAD 監視中、発話を待機 (発話終了で自動的に PROCESSING へ)
-  PROCESSING : STT + ペースト実行中 (完了で LISTENING へ戻る)
+  IDLE      : VAD 停止中 (ホットキーで LISTENING へ)
+  LISTENING : VAD 監視中 + Worker がキューを随時処理
 
 スレッドモデル:
   メインスレッド : pynput ホットキー監視 (常時稼働)
   VAD スレッド  : マイク監視・発話検出 (LISTENING 中に常時稼働)
-  ワーカースレッド: STT / ペースト (発話検出のたびに起動)
-  ※ PROCESSING 中に新たな発話が終了しても、そのブロックはスキップする
+  Worker スレッド: Queue から WAV を取り出して STT → ペースト (LISTENING 中に常時稼働)
+
+  発話が PROCESSING 中に届いてもキューに積まれるため、音声は一切失われない。
 """
 
+import queue
 import signal
 import sys
 import threading
@@ -42,6 +43,8 @@ HOTKEY = {
     keyboard.Key.space,
 }
 
+_SENTINEL = None  # Worker スレッド終了シグナル
+
 
 # ─────────────────────────────────────
 # 状態定義
@@ -49,7 +52,6 @@ HOTKEY = {
 class State(Enum):
     IDLE = auto()
     LISTENING = auto()
-    PROCESSING = auto()
 
 
 # ─────────────────────────────────────
@@ -60,7 +62,8 @@ class AirType:
     AirType v2 の全処理を統合・管理するクラス。
 
     - ホットキーで監視モード ON/OFF
-    - VAD が発話を自動検出 → STT → ペーストのパイプライン実行
+    - VAD が発話を自動検出 → Queue → Worker が順に STT → ペースト
+    - PROCESSING 中の新発話もキューに積まれ、一切失われない
     """
 
     def __init__(self):
@@ -73,6 +76,10 @@ class AirType:
         self.refiner = RuleBasedRefiner()
         self.paster = Paster()
         self.recorder = VADRecorder(on_audio_ready=self._on_audio_ready)
+
+        # キュー (VAD → Worker)
+        self._audio_queue: queue.Queue[Path | None] = queue.Queue()
+        self._worker_thread: threading.Thread | None = None
 
         # 状態管理
         self.state = State.IDLE
@@ -114,34 +121,61 @@ class AirType:
             if self.state == State.IDLE:
                 self.state = State.LISTENING
                 self._log_state("IDLE → LISTENING")
+                self._start_worker()
                 self.recorder.start_listening()
 
             elif self.state == State.LISTENING:
                 self.state = State.IDLE
                 self._log_state("LISTENING → IDLE")
                 self.recorder.stop_listening()
+                self._stop_worker()
 
-            elif self.state == State.PROCESSING:
-                print("[AirType] 処理中です。完了までお待ちください...")
+    # ── Worker スレッド制御 ───────────────
+    def _start_worker(self):
+        """キューから WAV を取り出して処理するワーカーを起動する。"""
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop, daemon=True
+        )
+        self._worker_thread.start()
+
+    def _stop_worker(self):
+        """ワーカーに終了シグナルを送り、キューに残る WAV を破棄する。"""
+        self._audio_queue.put(_SENTINEL)
+
+        # キューに残っている WAV ファイルを削除
+        while True:
+            try:
+                item = self._audio_queue.get_nowait()
+                if item is not None and item.exists():
+                    item.unlink()
+            except queue.Empty:
+                break
+
+    def _worker_loop(self):
+        """LISTENING 中はキューを監視し、WAV が届いたら処理する。"""
+        while True:
+            wav_path = self._audio_queue.get()
+            if wav_path is _SENTINEL:
+                print("[Worker] 停止")
+                break
+            self._run_pipeline(wav_path)
 
     # ── VAD コールバック ──────────────────
     def _on_audio_ready(self, wav_path: Path):
         """
         VADRecorder から発話区間の WAV が届いたときに呼ばれる。
-        PROCESSING 中は新しい音声をスキップする。
+        状態に関わらずキューに積む (Worker が順番に処理する)。
         """
         with self._state_lock:
             if self.state != State.LISTENING:
-                # IDLE または既に PROCESSING 中 → スキップ
                 if wav_path.exists():
                     wav_path.unlink()
-                if self.state == State.PROCESSING:
-                    print("[AirType] 処理中のため今回の発話はスキップします")
                 return
-            self.state = State.PROCESSING
-            self._log_state("LISTENING → PROCESSING")
 
-        self._run_pipeline(wav_path)
+        queue_size = self._audio_queue.qsize()
+        if queue_size > 0:
+            print(f"[Queue] キューに追加 (待機中: {queue_size}件)")
+        self._audio_queue.put(wav_path)
 
     # ── パイプライン実行 ──────────────────
     def _run_pipeline(self, wav_path: Path):
@@ -168,11 +202,6 @@ class AirType:
         finally:
             if wav_path.exists():
                 wav_path.unlink()
-
-            with self._state_lock:
-                if self.state == State.PROCESSING:
-                    self.state = State.LISTENING
-                    self._log_state("PROCESSING → LISTENING")
 
     # ── ユーティリティ ─────────────────────
     @staticmethod

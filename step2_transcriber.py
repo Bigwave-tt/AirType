@@ -165,7 +165,6 @@ class WhisperTranscriber:
             "-f", str(wav_path),
             "-l", self.language or "auto",
             "--prompt", INITIAL_PROMPT,  # 技術用語の同音異義語誤認識を軽減
-            "--no-prints",   # 進捗ログを抑制
         ]
 
         result = subprocess.run(

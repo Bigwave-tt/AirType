@@ -12,20 +12,20 @@ AirType - Step 2: whisper.cpp (Vulkan GPU) による音声→テキスト変換
     AirType/              ← このファイルがある場所
     whisper.cpp-windows-vulkan/
       whisper-cli.exe
-      ggml-kotoba-whisper-v2.0-q5_0.bin   ← 推奨 (速度・精度バランス)
-      ggml-kotoba-whisper-v2.0-q8_0.bin   ← 高精度版 (--model kotoba-q8)
+      ggml-kotoba-whisper-v2.0-q5_0.bin   ← 推奨 (速度・精度バランス・約538MB)
+      ggml-kotoba-whisper-v2.0.bin         ← 量子化なし完全版 (最高精度・約1.52GB)
       ggml-large-v3.bin                    ← 汎用 (--model large-v3)
       ggml-vulkan.dll
       ...
 
 Kotoba-Whisper GGML ダウンロード (PowerShell):
-  # q5_0 バランス型 (推奨・約1.1GB)
+  # q5_0 バランス型 (推奨・約538MB) ※ 精度は完全版とほぼ同等
   curl.exe -L -o ggml-kotoba-whisper-v2.0-q5_0.bin `
     "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin"
 
-  # q8_0 高精度型 (約1.7GB)
-  curl.exe -L -o ggml-kotoba-whisper-v2.0-q8_0.bin `
-    "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q8_0.bin"
+  # 量子化なし完全版 (約1.52GB)
+  curl.exe -L -o ggml-kotoba-whisper-v2.0.bin `
+    "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0.bin"
 """
 
 import re
@@ -48,22 +48,22 @@ WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
 #   - 本家 large-v3 と同等の日本語精度
 #   - モデルが軽いためタイムアウトリスクが物理的に消滅
 MODELS = {
-    "kotoba-q5":  WHISPER_DIR / "ggml-kotoba-whisper-v2.0-q5_0.bin",  # 推奨: 速度・精度バランス (~1.1GB)
-    "kotoba-q8":  WHISPER_DIR / "ggml-kotoba-whisper-v2.0-q8_0.bin",  # 高精度: ほぼ無劣化 (~1.7GB)
-    "large-v3":   WHISPER_DIR / "ggml-large-v3.bin",                   # 汎用: 量子化なし (最も遅い)
-    "accurate":   WHISPER_DIR / "ggml-large-v3-q5_0.bin",              # 汎用: 量子化あり (遅い)
-    "turbo":      WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",        # 汎用: 高速 (やや低精度)
+    "kotoba-q5":   WHISPER_DIR / "ggml-kotoba-whisper-v2.0-q5_0.bin",  # 推奨: 速度・精度バランス (~538MB)
+    "kotoba-full": WHISPER_DIR / "ggml-kotoba-whisper-v2.0.bin",        # 最高精度: 量子化なし (~1.52GB)
+    "large-v3":    WHISPER_DIR / "ggml-large-v3.bin",                   # 汎用: 量子化なし (最も遅い)
+    "accurate":    WHISPER_DIR / "ggml-large-v3-q5_0.bin",              # 汎用: 量子化あり (遅い)
+    "turbo":       WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",        # 汎用: 高速 (やや低精度)
 }
-DEFAULT_MODEL = "kotoba-q8"
+DEFAULT_MODEL = "kotoba-q5"
 
 # モデル別タイムアウト (秒)
 # kotoba は軽量なので 30 秒で十分; large 系は 120 秒
 MODEL_TIMEOUTS = {
-    "kotoba-q5": 30,
-    "kotoba-q8": 30,
-    "large-v3":  120,
-    "accurate":  120,
-    "turbo":     60,
+    "kotoba-q5":   30,
+    "kotoba-full": 45,
+    "large-v3":    120,
+    "accurate":    120,
+    "turbo":       60,
 }
 
 DEFAULT_LANGUAGE = "ja"
@@ -129,10 +129,20 @@ class WhisperTranscriber:
                 f"whisper.cpp-windows-vulkan フォルダを AirType フォルダと同じ場所に置いてください。"
             )
         if not self.model_path.exists():
+            _kotoba_hints = {
+                "kotoba-q5":   (
+                    "ggml-kotoba-whisper-v2.0-q5_0.bin を whisper.cpp-windows-vulkan フォルダに置いてください。\n"
+                    "ダウンロード: curl.exe -L -o ggml-kotoba-whisper-v2.0-q5_0.bin "
+                    '"https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin"'
+                ),
+                "kotoba-full": (
+                    "ggml-kotoba-whisper-v2.0.bin を whisper.cpp-windows-vulkan フォルダに置いてください。\n"
+                    "ダウンロード: curl.exe -L -o ggml-kotoba-whisper-v2.0.bin "
+                    '"https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0.bin"'
+                ),
+            }
             hint = (
-                "ggml-kotoba-whisper-v2.0-q5_0.bin を whisper.cpp-windows-vulkan フォルダに置いてください。\n"
-                "ダウンロード: curl.exe -L -o ggml-kotoba-whisper-v2.0-q5_0.bin "
-                '"https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin"'
+                _kotoba_hints.get(model, f"対応するモデルファイルを {WHISPER_DIR} に置いてください。")
                 if model.startswith("kotoba")
                 else f"対応するモデルファイルを {WHISPER_DIR} に置いてください。"
             )

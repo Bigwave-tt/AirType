@@ -30,7 +30,13 @@ from typing import Optional
 _HERE = Path(__file__).parent
 WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
 WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
-WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3-q5_0.bin"
+
+# 選択可能なモデル
+MODELS = {
+    "accurate": WHISPER_DIR / "ggml-large-v3-q5_0.bin",       # 高精度 (遅い)
+    "turbo":    WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",  # 高速 (やや低精度)
+}
+DEFAULT_MODEL = "accurate"
 
 DEFAULT_LANGUAGE = "ja"
 
@@ -73,24 +79,29 @@ class WhisperTranscriber:
     def __init__(
         self,
         language: Optional[str] = DEFAULT_LANGUAGE,
+        model: str = DEFAULT_MODEL,
         device: str = "auto",
         use_kotoba: bool = False,
     ):
         self.language = language
+
+        if model not in MODELS:
+            raise ValueError(f"model は {list(MODELS)} のいずれかを指定してください: {model!r}")
+        self.model_path = MODELS[model]
 
         if not WHISPER_CLI.exists():
             raise FileNotFoundError(
                 f"whisper-cli.exe が見つかりません: {WHISPER_CLI}\n"
                 f"whisper.cpp-windows-vulkan フォルダを AirType フォルダと同じ場所に置いてください。"
             )
-        if not WHISPER_MODEL.exists():
+        if not self.model_path.exists():
             raise FileNotFoundError(
-                f"モデルファイルが見つかりません: {WHISPER_MODEL}\n"
-                f"ggml-large-v3.bin を {WHISPER_DIR} に置いてください。"
+                f"モデルファイルが見つかりません: {self.model_path}\n"
+                f"ggml-large-v3(-turbo)-q5_0.bin を {WHISPER_DIR} に置いてください。"
             )
 
         print(f"[Transcriber] whisper-cli.exe: {WHISPER_CLI}")
-        print(f"[Transcriber] モデル: {WHISPER_MODEL.name}")
+        print(f"[Transcriber] モデル: {self.model_path.name}")
         print(f"[Transcriber] バックエンド: Vulkan (AMD RX 6600)")
         print("[Transcriber] 準備完了")
 
@@ -115,7 +126,7 @@ class WhisperTranscriber:
 
         cmd = [
             str(WHISPER_CLI),
-            "-m", str(WHISPER_MODEL),
+            "-m", str(self.model_path),
             "-f", str(wav_path),
             "-l", self.language or "auto",
             "--prompt", INITIAL_PROMPT,  # 技術用語の同音異義語誤認識を軽減

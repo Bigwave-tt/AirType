@@ -227,8 +227,9 @@ def main():
         choices=list(MODELS),
         default=DEFAULT_MODEL,
         help=f"使用するWhisperモデル (デフォルト: {DEFAULT_MODEL})\n"
-             "  accurate = high quality (large-v3-q5_0)\n"
-             "  turbo    = fast (large-v3-turbo-q5_0)",
+             "  large-v3 = 最高精度・量子化なし (ggml-large-v3.bin)\n"
+             "  accurate = 高精度・量子化あり (ggml-large-v3-q5_0.bin)\n"
+             "  turbo    = 高速・量子化あり  (ggml-large-v3-turbo-q5_0.bin)",
     )
     args = parser.parse_args()
 

@@ -33,8 +33,9 @@ WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
 
 # 選択可能なモデル
 MODELS = {
-    "accurate": WHISPER_DIR / "ggml-large-v3-q5_0.bin",       # 高精度 (遅い)
-    "turbo":    WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",  # 高速 (やや低精度)
+    "large-v3": WHISPER_DIR / "ggml-large-v3.bin",             # 最高精度・量子化なし (最も遅い)
+    "accurate": WHISPER_DIR / "ggml-large-v3-q5_0.bin",        # 高精度・量子化あり (遅い)
+    "turbo":    WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",  # 高速・量子化あり (やや低精度)
 }
 DEFAULT_MODEL = "accurate"
 

@@ -30,7 +30,7 @@ from typing import Optional
 _HERE = Path(__file__).parent
 WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
 WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
-WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin"
+WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3-q5_0.bin"
 
 DEFAULT_LANGUAGE = "ja"
 

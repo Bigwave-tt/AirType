@@ -4,7 +4,7 @@ AirType - Step 2: whisper.cpp (Vulkan GPU) による音声→テキスト変換
 設計:
 - whisper-cli.exe を subprocess で呼び出す
 - AMD RX 6600 の Vulkan バックエンドを使用 (ggml-vulkan.dll)
-- モデル: ggml-large-v3.bin (whisper.cpp フォルダ内)
+- デフォルトモデル: kotoba-whisper-v2.0-q5_0 (日本語特化・高速・高精度)
 - transcribe() は WAV ファイルパスを受け取りテキスト文字列を返す
 
 フォルダ構成:
@@ -12,9 +12,20 @@ AirType - Step 2: whisper.cpp (Vulkan GPU) による音声→テキスト変換
     AirType/              ← このファイルがある場所
     whisper.cpp-windows-vulkan/
       whisper-cli.exe
-      ggml-large-v3.bin
+      ggml-kotoba-whisper-v2.0-q5_0.bin   ← 推奨 (速度・精度バランス)
+      ggml-kotoba-whisper-v2.0-q8_0.bin   ← 高精度版 (--model kotoba-q8)
+      ggml-large-v3.bin                    ← 汎用 (--model large-v3)
       ggml-vulkan.dll
       ...
+
+Kotoba-Whisper GGML ダウンロード (PowerShell):
+  # q5_0 バランス型 (推奨・約1.1GB)
+  curl.exe -L -o ggml-kotoba-whisper-v2.0-q5_0.bin `
+    "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin"
+
+  # q8_0 高精度型 (約1.7GB)
+  curl.exe -L -o ggml-kotoba-whisper-v2.0-q8_0.bin `
+    "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q8_0.bin"
 """
 
 import re
@@ -30,7 +41,29 @@ from typing import Optional
 _HERE = Path(__file__).parent
 WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
 WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
-WHISPER_MODEL = WHISPER_DIR / "ggml-large-v3.bin"
+
+# 選択可能なモデル
+# kotoba-whisper-v2.0: デコーダー層を 32→2 に蒸留した日本語特化モデル
+#   - 本家 large-v3 と同等の日本語精度
+#   - モデルが軽いためタイムアウトリスクが物理的に消滅
+MODELS = {
+    "kotoba-q5":  WHISPER_DIR / "ggml-kotoba-whisper-v2.0-q5_0.bin",  # 推奨: 速度・精度バランス (~1.1GB)
+    "kotoba-q8":  WHISPER_DIR / "ggml-kotoba-whisper-v2.0-q8_0.bin",  # 高精度: ほぼ無劣化 (~1.7GB)
+    "large-v3":   WHISPER_DIR / "ggml-large-v3.bin",                   # 汎用: 量子化なし (最も遅い)
+    "accurate":   WHISPER_DIR / "ggml-large-v3-q5_0.bin",              # 汎用: 量子化あり (遅い)
+    "turbo":      WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",        # 汎用: 高速 (やや低精度)
+}
+DEFAULT_MODEL = "kotoba-q5"
+
+# モデル別タイムアウト (秒)
+# kotoba は軽量なので 30 秒で十分; large 系は 120 秒
+MODEL_TIMEOUTS = {
+    "kotoba-q5": 30,
+    "kotoba-q8": 30,
+    "large-v3":  120,
+    "accurate":  120,
+    "turbo":     60,
+}
 
 DEFAULT_LANGUAGE = "ja"
 
@@ -47,6 +80,13 @@ INITIAL_PROMPT = (
 # タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
 
+# whisper.cpp が出力するゴミトークンのパターン (短い音声や --prompt 時に発生)
+# 例: ≪≫、(無音)、[音楽]、[拍手] 等
+_NOISE_RE = re.compile(
+    r"[≪≫《》【】\[\(（]"      # 括弧類で始まるトークン
+    r"|^\s*[\(\[（【][^\)\]）】]*[\)\]）】]\s*$"  # 行全体が括弧で囲まれている
+)
+
 
 # ─────────────────────────────────────
 # WhisperTranscriber クラス
@@ -59,31 +99,44 @@ class WhisperTranscriber:
     ----------
     language : str | None
         文字起こし言語コード ("ja", "en", 等)。None で自動検出。
-    use_kotoba : bool
-        後方互換のために残しているが現在は無効 (whisper.cpp を使用)。
+    model : str
+        使用するモデルキー。MODELS のいずれか。デフォルトは "kotoba-q5"。
     """
 
     def __init__(
         self,
         language: Optional[str] = DEFAULT_LANGUAGE,
+        model: str = DEFAULT_MODEL,
         device: str = "auto",
-        use_kotoba: bool = False,
     ):
         self.language = language
+
+        if model not in MODELS:
+            raise ValueError(f"model は {list(MODELS)} のいずれかを指定してください: {model!r}")
+        self.model_key = model
+        self.model_path = MODELS[model]
+        self.timeout = MODEL_TIMEOUTS[model]
 
         if not WHISPER_CLI.exists():
             raise FileNotFoundError(
                 f"whisper-cli.exe が見つかりません: {WHISPER_CLI}\n"
                 f"whisper.cpp-windows-vulkan フォルダを AirType フォルダと同じ場所に置いてください。"
             )
-        if not WHISPER_MODEL.exists():
+        if not self.model_path.exists():
+            hint = (
+                "ggml-kotoba-whisper-v2.0-q5_0.bin を whisper.cpp-windows-vulkan フォルダに置いてください。\n"
+                "ダウンロード: curl.exe -L -o ggml-kotoba-whisper-v2.0-q5_0.bin "
+                '"https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0-q5_0.bin"'
+                if model.startswith("kotoba")
+                else f"対応するモデルファイルを {WHISPER_DIR} に置いてください。"
+            )
             raise FileNotFoundError(
-                f"モデルファイルが見つかりません: {WHISPER_MODEL}\n"
-                f"ggml-large-v3.bin を {WHISPER_DIR} に置いてください。"
+                f"モデルファイルが見つかりません: {self.model_path}\n{hint}"
             )
 
         print(f"[Transcriber] whisper-cli.exe: {WHISPER_CLI}")
-        print(f"[Transcriber] モデル: {WHISPER_MODEL.name}")
+        print(f"[Transcriber] モデル: {self.model_path.name}")
+        print(f"[Transcriber] タイムアウト: {self.timeout}秒")
         print(f"[Transcriber] バックエンド: Vulkan (AMD RX 6600)")
         print("[Transcriber] 準備完了")
 
@@ -108,7 +161,7 @@ class WhisperTranscriber:
 
         cmd = [
             str(WHISPER_CLI),
-            "-m", str(WHISPER_MODEL),
+            "-m", str(self.model_path),
             "-f", str(wav_path),
             "-l", self.language or "auto",
             "--prompt", INITIAL_PROMPT,  # 技術用語の同音異義語誤認識を軽減
@@ -121,6 +174,7 @@ class WhisperTranscriber:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=self.timeout,
         )
 
         if result.returncode != 0:
@@ -146,7 +200,7 @@ class WhisperTranscriber:
             m = _TIMESTAMP_RE.match(line.strip())
             if m:
                 text = m.group(1).strip()
-                if text:
+                if text and not _NOISE_RE.search(text):
                     texts.append(text)
 
         return "".join(texts)
@@ -155,8 +209,8 @@ class WhisperTranscriber:
 # ─────────────────────────────────────
 # 単体テスト用エントリポイント
 # ─────────────────────────────────────
-def _test_with_existing_file(wav_path: str):
-    transcriber = WhisperTranscriber()
+def _test_with_existing_file(wav_path: str, model: str = DEFAULT_MODEL):
+    transcriber = WhisperTranscriber(model=model)
     text = transcriber.transcribe(Path(wav_path))
     print(f"\n結果: {text}")
 
@@ -165,6 +219,8 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1:
-        _test_with_existing_file(sys.argv[1])
+        model_arg = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODEL
+        _test_with_existing_file(sys.argv[1], model=model_arg)
     else:
-        print("使い方: python step2_transcriber.py <wav_file>")
+        print("使い方: python step2_transcriber.py <wav_file> [model]")
+        print(f"  model: {list(MODELS)} (デフォルト: {DEFAULT_MODEL})")

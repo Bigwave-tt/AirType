@@ -29,6 +29,7 @@ Kotoba-Whisper GGML ダウンロード (PowerShell):
 """
 
 import re
+import struct
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -70,12 +71,7 @@ DEFAULT_LANGUAGE = "ja"
 # whisper.cpp の --prompt に渡す初期文脈テキスト
 # 技術用語を事前提示することで同音異義語の誤認識を軽減する
 # 例: 「軌道」→「起動」、「記録」→「録音」 等
-INITIAL_PROMPT = (
-    "AirTypeは音声入力ツールです。"
-    "起動、録音、文字起こし、整形、ペースト、GPU、Vulkan、モデル、"
-    "プログラム、コード、変換、認識、処理、設定、実行、停止、"
-    "ファイル、フォルダ、パス、ダウンロード、インストール。"
-)
+INITIAL_PROMPT = "日本語の音声入力です。"
 
 # タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
@@ -158,6 +154,7 @@ class WhisperTranscriber:
             raise FileNotFoundError(f"WAV ファイルが見つかりません: {wav_path}")
 
         print(f"[Transcriber] 文字起こし開始: {wav_path.name}")
+        self._check_audio_level(wav_path)
 
         cmd = [
             str(WHISPER_CLI),
@@ -181,18 +178,35 @@ class WhisperTranscriber:
                 f"whisper-cli.exe が失敗しました (code={result.returncode}):\n{result.stderr}"
             )
 
-        # 空結果のときは生出力をデバッグ表示
         full_text = self._parse_output(result.stdout)
         if not full_text:
-            print("[Transcriber] DEBUG stdout:")
+            print("[Transcriber] WARNING: テキストが取得できませんでした")
+            print("[Transcriber] DEBUG stdout (last 30 lines):")
             for line in result.stdout.splitlines()[-30:]:
                 print(f"  | {line}")
             if result.stderr:
-                print("[Transcriber] DEBUG stderr (last 10 lines):")
-                for line in result.stderr.splitlines()[-10:]:
-                    print(f"  | {line}")
+                # decode time を stderr から抽出して表示
+                for line in result.stderr.splitlines():
+                    if "decode time" in line or "encode time" in line or "total time" in line:
+                        print(f"  [timing] {line.strip()}")
         print(f"[Transcriber] 文字起こし結果:\n  → {full_text!r}")
         return full_text
+
+    @staticmethod
+    def _check_audio_level(wav_path: Path) -> None:
+        """WAVファイルの音量を確認してデバッグ情報を出力する。"""
+        try:
+            data = wav_path.read_bytes()
+            # WAV データ部分 (44バイトヘッダー以降) を16bitサンプルとして読む
+            samples = struct.unpack_from(f"<{(len(data) - 44) // 2}h", data, 44)
+            if samples:
+                peak = max(abs(s) for s in samples)
+                rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+                print(f"[Transcriber] 音量チェック: peak={peak}, rms={rms:.1f} (無音判定: peak<100)")
+                if peak < 100:
+                    print("[Transcriber] WARNING: 録音がほぼ無音です。マイク設定を確認してください。")
+        except Exception:
+            pass  # 音量チェック失敗は無視
 
     @staticmethod
     def _parse_output(output: str) -> str:

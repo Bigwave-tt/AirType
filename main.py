@@ -2,18 +2,24 @@
 AirType - メインスクリプト (全モジュール統合)
 
 データフロー:
-  [ホットキー] → 録音開始
-  [ホットキー] → 録音停止 → STT (faster-whisper) → 整形 (Ollama) → ペースト
+  [無変換 押下] → 録音開始
+  [無変換 離放] → 録音停止 → WAV → Queue → Worker → STT → 整形 → ペースト
 
 状態マシン:
-  IDLE → RECORDING → PROCESSING → IDLE
+  IDLE ↔ RECORDING  (STT/ペースト処理は Worker スレッドが非同期で担当)
 
 スレッドモデル:
-  メインスレッド : pynput ホットキー監視 (常時稼働)
-  ワーカースレッド: 録音 / STT / LLM / ペースト (トリガー毎に起動)
-  PROCESSING 中の再トリガーは無視する (二重実行防止)
+  メインスレッド  : pynput キーボード監視 (常時稼働)
+  Worker スレッド : Queue から WAV を取り出して STT→整形→ペーストを繰り返す (常時稼働・不老不死)
+  録音は sounddevice の非同期ストリームで行うため追加スレッド不要
+
+Push-to-Talk (PTT):
+  無変換キー (VK_NONCONVERT = 29) を押し続けている間だけ録音する。
+  キーを離した瞬間に WAV を Queue に投入し、Worker が処理する。
+  Worker は死なないため、キーを連続して押しても全ての音声が順番に処理される。
 """
 
+import queue
 import signal
 import sys
 import threading
@@ -30,14 +36,13 @@ from step4_paster import Paster
 
 
 # ─────────────────────────────────────
-# 設定
+# 定数
 # ─────────────────────────────────────
-# モデルは step2_transcriber.py 内の MODELS / DEFAULT_MODEL で管理 (デフォルト: kotoba-q5)
-HOTKEY = {
-    keyboard.Key.ctrl_l,
-    keyboard.Key.shift,
-    keyboard.Key.space,
-}
+# 無変換キーの Windows 仮想キーコード (VK_NONCONVERT = 0x1D = 29)
+PTT_KEY_VK = 29
+
+# Worker への終了シグナル (Poison Pill)
+_POISON_PILL = None
 
 
 # ─────────────────────────────────────
@@ -46,7 +51,6 @@ HOTKEY = {
 class State(Enum):
     IDLE = auto()
     RECORDING = auto()
-    PROCESSING = auto()
 
 
 # ─────────────────────────────────────
@@ -56,9 +60,9 @@ class AirType:
     """
     AirType の全処理を統合・管理するクラス。
 
-    - ホットキー検知 → 状態遷移
-    - 録音 → STT → LLM 整形 → ペースト のパイプライン実行
-    - エラー発生時は IDLE に戻してリトライ可能にする
+    - PTT キー検知 → 状態遷移
+    - 録音 → Queue → Worker (STT → 整形 → ペースト) のパイプライン
+    - Worker は終了シグナル (Poison Pill) を受け取るまで動き続ける
     """
 
     def __init__(self):
@@ -75,102 +79,131 @@ class AirType:
         # 状態管理
         self.state = State.IDLE
         self._state_lock = threading.Lock()
-        self._pressed_keys: set = set()
+        self._ptt_key_down = False  # キーリピート対策フラグ
+
+        # Queue + 不老不死 Worker スレッド
+        self._wav_queue: queue.Queue = queue.Queue()
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name="AirType-Worker",
+        )
+        self._worker.start()
 
         print("\n" + "=" * 50)
         print("  AirType 起動完了")
-        print(f"  ホットキー: Ctrl + Shift + Space")
+        print(f"  PTT キー: 無変換 (VK={PTT_KEY_VK}) を押し続けて録音")
         print(f"  終了: Ctrl + C を2回")
         print("=" * 50 + "\n")
 
-    # ── キー正規化 ────────────────────────
+    # ── PTT キー判定 ──────────────────────
     @staticmethod
-    def _normalize(key) -> object:
-        _map = {
-            keyboard.Key.ctrl_r: keyboard.Key.ctrl_l,
-            keyboard.Key.shift_r: keyboard.Key.shift,
-        }
-        return _map.get(key, key)
+    def _is_ptt_key(key) -> bool:
+        """無変換キー (VK_NONCONVERT=29) かどうかを仮想キーコードで判定する"""
+        return hasattr(key, "vk") and key.vk == PTT_KEY_VK
 
-    def _is_hotkey(self) -> bool:
-        normalized = {self._normalize(k) for k in self._pressed_keys}
-        return HOTKEY.issubset(normalized)
-
-    # ── ホットキーイベント ────────────────
+    # ── キーイベント ──────────────────────
     def _on_press(self, key):
-        self._pressed_keys.add(key)
-        if self._is_hotkey():
-            self._handle_toggle()
+        if not self._is_ptt_key(key):
+            return
+
+        # キーリピート対策: すでに押下中なら 2回目以降のイベントは無視する
+        if self._ptt_key_down:
+            return
+        self._ptt_key_down = True
+
+        with self._state_lock:
+            if self.state != State.IDLE:
+                return
+            self.state = State.RECORDING
+        self._log_state("IDLE → RECORDING")
+        self.recorder.start()
 
     def _on_release(self, key):
-        self._pressed_keys.discard(key)
+        if not self._is_ptt_key(key):
+            return
+        if not self._ptt_key_down:
+            return
+        self._ptt_key_down = False
 
-    # ── 状態遷移ハンドラ ──────────────────
-    def _handle_toggle(self):
         with self._state_lock:
-            current = self.state
+            if self.state != State.RECORDING:
+                return
+            self.state = State.IDLE
+        self._log_state("RECORDING → IDLE (WAV をキューに投入)")
 
-            if current == State.IDLE:
-                self.state = State.RECORDING
-                self._log_state("IDLE → RECORDING")
-                threading.Thread(target=self.recorder.start, daemon=True).start()
+        # 録音停止・WAV 保存・Queue 投入はキーリスナーをブロックしないよう別スレッドで行う
+        threading.Thread(
+            target=self._stop_and_enqueue,
+            daemon=True,
+            name="AirType-Enqueue",
+        ).start()
 
-            elif current == State.RECORDING:
-                self.state = State.PROCESSING
-                self._log_state("RECORDING → PROCESSING")
-                threading.Thread(target=self._run_pipeline, daemon=True).start()
-
-            elif current == State.PROCESSING:
-                # 処理中の再トリガーは無視
-                print("[AirType] 処理中です。完了までお待ちください...")
-
-    # ── パイプライン実行 ──────────────────
-    def _run_pipeline(self):
-        """
-        録音停止 → STT → LLM 整形 → ペースト を順に実行する。
-        エラーが発生した場合は状態を IDLE に戻す。
-        """
-        wav_path: Path | None = None
-
+    # ── 録音停止 & キュー投入 ──────────────
+    def _stop_and_enqueue(self):
+        """録音を停止して WAV ファイルを Queue に投入する"""
         try:
-            # 1. 録音停止・WAV 保存
             wav_path = self.recorder.stop()
+            print(f"[AirType] WAV をキューに投入: {wav_path.name}")
+            self._wav_queue.put(wav_path)
+        except Exception as e:
+            print(f"[AirType] 録音停止エラー: {e}")
 
-            # 2. 音声認識 (STT)
+    # ── 不老不死 Worker ────────────────────
+    def _worker_loop(self):
+        """
+        Queue から WAV を取り出して STT → 整形 → ペーストを繰り返す。
+        Poison Pill (None) を受け取ったら終了する。
+        """
+        print("[Worker] 起動完了。キューを監視中...")
+        while True:
+            wav_path = self._wav_queue.get()
+            if wav_path is _POISON_PILL:
+                print("[Worker] Poison Pill 受信。終了します。")
+                self._wav_queue.task_done()
+                break
+            self._run_pipeline(wav_path)
+            self._wav_queue.task_done()
+
+    # ── パイプライン実行 ────────────────────
+    def _run_pipeline(self, wav_path: Path):
+        """STT → 整形 → ペースト を順に実行する"""
+        try:
+            # 1. 音声認識 (STT)
             raw_text = self.transcriber.transcribe(wav_path)
             if not raw_text.strip():
                 print("[AirType] 音声が認識されませんでした")
                 return
 
-            # 3. LLM によるテキスト整形
+            # 2. テキスト整形
             refined_text = self.refiner.refine(raw_text)
             if not refined_text.strip():
-                print("[AirType] LLM が空のテキストを返しました。生テキストを使用します")
+                print("[AirType] 整形後が空のため生テキストを使用します")
                 refined_text = raw_text
             elif self._is_ascii_dominant(refined_text) and not self._is_ascii_dominant(raw_text):
                 print("[AirType] LLM が英語に変換しました。生テキストを使用します")
                 refined_text = raw_text
 
-            # 4. アクティブウィンドウへペースト
+            # 3. アクティブウィンドウへペースト
             self.paster.paste(refined_text)
-
             print(f"\n[AirType] 完了: {refined_text!r}\n")
 
         except Exception as e:
-            print(f"[AirType] エラー: {e}")
+            print(f"[AirType] パイプラインエラー: {e}")
 
         finally:
-            # 一時ファイルの後片付け
             if wav_path and wav_path.exists():
                 wav_path.unlink()
                 print(f"[AirType] 一時ファイルを削除: {wav_path.name}")
 
-            # 状態を IDLE に戻す
-            with self._state_lock:
-                self.state = State.IDLE
-            self._log_state("PROCESSING → IDLE")
+    # ── シャットダウン ─────────────────────
+    def shutdown(self):
+        """キューに残った処理を完了させてから Worker を安全に停止する"""
+        print("[AirType] Worker に終了シグナルを送信...")
+        self._wav_queue.put(_POISON_PILL)
+        self._worker.join(timeout=10.0)
 
-    # ── ユーティリティ ─────────────────────
+    # ── ユーティリティ ──────────────────────
     @staticmethod
     def _is_ascii_dominant(text: str) -> bool:
         """テキストの大半がASCII文字（英語など）かどうかを判定する"""
@@ -184,9 +217,9 @@ class AirType:
     def _log_state(transition: str):
         print(f"[状態] {transition}")
 
-    # ── 起動 ──────────────────────────────
+    # ── 起動 ───────────────────────────────
     def run(self):
-        """ホットキー監視ループを起動する (ブロッキング)"""
+        """キーボード監視ループを起動する (ブロッキング)"""
         with keyboard.Listener(
             on_press=self._on_press,
             on_release=self._on_release,
@@ -206,6 +239,7 @@ def main():
         now = time.time()
         if now - _last_ctrl_c[0] < 2.0:
             print("\n[AirType] 終了します")
+            app.shutdown()
             sys.exit(0)
         _last_ctrl_c[0] = now
         print("\n[AirType] もう一度 Ctrl+C を押すと終了します (2秒以内)")

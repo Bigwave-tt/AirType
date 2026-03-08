@@ -181,7 +181,16 @@ class WhisperTranscriber:
                 f"whisper-cli.exe が失敗しました (code={result.returncode}):\n{result.stderr}"
             )
 
+        # 空結果のときは生出力をデバッグ表示
         full_text = self._parse_output(result.stdout)
+        if not full_text:
+            print("[Transcriber] DEBUG stdout:")
+            for line in result.stdout.splitlines()[-30:]:
+                print(f"  | {line}")
+            if result.stderr:
+                print("[Transcriber] DEBUG stderr (last 10 lines):")
+                for line in result.stderr.splitlines()[-10:]:
+                    print(f"  | {line}")
         print(f"[Transcriber] 文字起こし結果:\n  → {full_text!r}")
         return full_text
 

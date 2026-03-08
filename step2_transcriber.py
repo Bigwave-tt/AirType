@@ -182,7 +182,8 @@ class WhisperTranscriber:
             "-f", str(wav_path),
             "-l", self.language or "auto",
             "--prompt", INITIAL_PROMPT,  # 技術用語の同音異義語誤認識を軽減
-            "-ngl", "99",               # 全レイヤーを GPU (Vulkan) にオフロード
+            # NOTE: Vulkan GPU は whisper.cpp のビルド時に組み込み済みのため
+            # -ngl (GPU レイヤー数) の指定は不要。指定するとこのビルドでは無音終了する。
         ]
 
         result = subprocess.run(
@@ -202,14 +203,14 @@ class WhisperTranscriber:
         full_text = self._parse_output(result.stdout)
         if not full_text:
             print("[Transcriber] WARNING: テキストが取得できませんでした")
+            print(f"[Transcriber] DEBUG returncode: {result.returncode}")
             print("[Transcriber] DEBUG stdout (last 30 lines):")
             for line in result.stdout.splitlines()[-30:]:
                 print(f"  | {line}")
             if result.stderr:
-                # decode time を stderr から抽出して表示
-                for line in result.stderr.splitlines():
-                    if "decode time" in line or "encode time" in line or "total time" in line:
-                        print(f"  [timing] {line.strip()}")
+                print("[Transcriber] DEBUG stderr (last 20 lines):")
+                for line in result.stderr.splitlines()[-20:]:
+                    print(f"  ! {line}")
         print(f"[Transcriber] 文字起こし結果:\n  → {full_text!r}")
         return full_text
 

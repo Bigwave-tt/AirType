@@ -15,15 +15,12 @@ requests>=2.31.0       # Ollama REST API 呼び出し
 
 # ─── Step 4: クリップボード + 自動ペースト ──────────
 pyperclip>=1.8.2       # クリップボード操作
-pyautogui>=0.9.54      # キーシミュレーション (Ctrl+V)
+# Ctrl+V シミュレーションは pynput (Step 1) を使用 (pyautogui 不要)
 
 # ─── 備考 ────────────────────────────────────────────
 # sounddevice は内部で PortAudio C ライブラリを使用します。
 # Linux: sudo apt install libportaudio2
 # macOS: brew install portaudio
-#
-# pyautogui は Linux で python3-xlib または python3-tk が必要です。
-# Linux: sudo apt install python3-xlib python3-tk
 #
 # Ollama は別途インストールが必要です:
 # https://ollama.ai/download

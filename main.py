@@ -36,7 +36,7 @@ from pathlib import Path
 
 from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
-from step3_refiner import RuleBasedRefiner
+from step3_refiner import LlamaRefiner
 from step4_paster import Paster
 from step5_gui import TrayIcon, SettingsWindow, HistoryWindow
 
@@ -274,7 +274,7 @@ class AirType:
         # 各モジュール初期化
         self.recorder    = Recorder()
         self.transcriber = WhisperTranscriber()
-        self.refiner     = RuleBasedRefiner()
+        self.refiner     = LlamaRefiner()
         self.paster      = Paster()
 
         # 状態管理

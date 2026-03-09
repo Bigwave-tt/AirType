@@ -83,13 +83,7 @@ class _PttHook:
     _WM_SYSKEYDOWN  = 0x0104
     _WM_SYSKEYUP    = 0x0105
 
-    _HOOKPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        ctypes.c_int,
-        ctypes.wintypes.WPARAM,
-        ctypes.wintypes.LPARAM,
-    )
-
+    # KBDLLHOOKSTRUCT: WH_KEYBOARD_LL フックが lParam で渡す構造体
     class _KBDLLHOOKSTRUCT(ctypes.Structure):
         _fields_ = [
             ("vkCode",      ctypes.wintypes.DWORD),
@@ -122,6 +116,29 @@ class _PttHook:
     def _run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
 
+        # WINFUNCTYPE はローカルスコープで定義する。
+        # クラス属性経由で参照すると Python 3.13 で型不一致エラーが発生するため。
+        # 戻り値は LRESULT = c_longlong (64-bit Windows)
+        _HOOKPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_longlong,
+            ctypes.c_int,
+            ctypes.wintypes.WPARAM,
+            ctypes.wintypes.LPARAM,
+        )
+
+        # SetWindowsHookExW / CallNextHookEx の型を明示して型チェックエラーを防ぐ
+        user32 = ctypes.windll.user32
+        user32.SetWindowsHookExW.restype  = ctypes.wintypes.HHOOK
+        user32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int, _HOOKPROC,
+            ctypes.wintypes.HINSTANCE, ctypes.wintypes.DWORD,
+        ]
+        user32.CallNextHookEx.restype  = ctypes.c_longlong
+        user32.CallNextHookEx.argtypes = [
+            ctypes.wintypes.HHOOK, ctypes.c_int,
+            ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM,
+        ]
+
         def _hook_proc(nCode, wParam, lParam):
             if nCode >= 0:
                 kb = ctypes.cast(
@@ -139,10 +156,10 @@ class _PttHook:
                         except Exception:
                             pass
                     return 1  # 握りつぶす (CallNextHookEx を呼ばない)
-            return ctypes.windll.user32.CallNextHookEx(None, nCode, wParam, lParam)
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
-        self._hook_fn = self._HOOKPROC(_hook_proc)
-        self._hook = ctypes.windll.user32.SetWindowsHookExW(
+        self._hook_fn = _HOOKPROC(_hook_proc)  # ローカル型でインスタンス化・GC防止
+        self._hook = user32.SetWindowsHookExW(
             self._WH_KEYBOARD_LL, self._hook_fn, None, 0
         )
 

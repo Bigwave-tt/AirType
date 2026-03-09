@@ -17,6 +17,10 @@ requests>=2.31.0       # Ollama REST API 呼び出し
 pyperclip>=1.8.2       # クリップボード操作
 # Ctrl+V シミュレーションは pynput (Step 1) を使用 (pyautogui 不要)
 
+# ─── Step 5: GUI (トレイ・設定・履歴) ────────────────
+pystray>=0.19.0        # システムトレイアイコン
+Pillow>=10.0.0         # トレイアイコン画像生成 (PIL)
+
 # ─── 備考 ────────────────────────────────────────────
 # sounddevice は内部で PortAudio C ライブラリを使用します。
 # Linux: sudo apt install libportaudio2

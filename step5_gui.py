@@ -120,13 +120,13 @@ class SettingsWindow:
     show() はメインスレッドから呼ぶこと。
     """
 
-    # 表示ラベル → モデルキー
-    _MODEL_LABELS = {
-        "kotoba-q5   (推奨・538 MB・日本語特化)":        "kotoba-q5",
-        "kotoba-full (最高精度・1.52 GB・日本語特化)":   "kotoba-full",
-        "turbo       (汎用・高速)":                      "turbo",
-        "accurate    (汎用・高精度)":                    "accurate",
-        "large-v3    (汎用・量子化なし・最大)":          "large-v3",
+    # モデルキー → 表示ラベル (順番が Combobox の表示順)
+    _MODELS = {
+        "kotoba-q5":   "kotoba-q5   (推奨・538 MB・日本語特化)",
+        "kotoba-full": "kotoba-full (最高精度・1.52 GB・日本語特化)",
+        "turbo":       "turbo       (汎用・高速)",
+        "accurate":    "accurate    (汎用・高精度)",
+        "large-v3":    "large-v3    (汎用・量子化なし・最大)",
     }
 
     def __init__(
@@ -135,7 +135,7 @@ class SettingsWindow:
         get_model: Callable[[], str],
         on_apply: Callable[[str], None],
     ):
-        self._master   = master
+        self._master    = master
         self._get_model = get_model
         self._on_apply  = on_apply
         self._win = None
@@ -148,6 +148,9 @@ class SettingsWindow:
         self._build()
 
     def _build(self):
+        from step2_transcriber import MODELS as _WHISPER_MODELS
+        from tkinter import messagebox
+
         win = tk.Toplevel(self._master)
         win.title("AirType 設定")
         win.resizable(False, False)
@@ -156,50 +159,67 @@ class SettingsWindow:
 
         PAD = {"padx": 12, "pady": 6}
 
-        # モデル選択
         tk.Label(win, text="音声認識モデル:", font=("Yu Gothic UI", 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", **PAD
         )
 
-        labels = list(self._MODEL_LABELS.keys())
-        current_key = self._get_model()
-        current_label = next(
-            (lbl for lbl, key in self._MODEL_LABELS.items() if key == current_key),
-            labels[0],
-        )
+        # ファイル存在チェックしながら表示ラベルを構築
+        display_labels = []
+        key_by_display: dict[str, str] = {}
+        current_display = None
 
-        model_var = tk.StringVar(value=current_label)
+        for key, label in self._MODELS.items():
+            path = _WHISPER_MODELS.get(key)
+            if path and path.exists():
+                display = label
+            else:
+                display = label + "  [未インストール]"
+            display_labels.append(display)
+            key_by_display[display] = key
+            if key == self._get_model():
+                current_display = display
+
+        if current_display is None:
+            current_display = display_labels[0]
+
+        model_var = tk.StringVar(value=current_display)
         combo = ttk.Combobox(
-            win, textvariable=model_var, values=labels,
-            width=44, state="readonly",
+            win, textvariable=model_var, values=display_labels,
+            width=50, state="readonly",
         )
         combo.grid(row=1, column=0, columnspan=2, sticky="ew", **PAD)
 
-        # 注意書き
-        note = tk.Label(
+        tk.Label(
             win,
-            text="※ モデル変更は適用後に有効になります（起動中に切替可能）",
+            text="[未インストール] のモデルはファイルをダウンロード後に使用できます",
             font=("Yu Gothic UI", 9),
-            fg="#666666",
-        )
-        note.grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+            fg="#888888",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
 
-        # ボタン
         btn_frame = tk.Frame(win)
         btn_frame.grid(row=3, column=0, columnspan=2, pady=(4, 12))
 
         def apply():
-            selected_label = model_var.get()
-            selected_key   = self._MODEL_LABELS.get(selected_label)
-            if selected_key:
-                self._on_apply(selected_key)
+            selected_display = model_var.get()
+            selected_key = key_by_display.get(selected_display)
+            if not selected_key:
+                return
+            path = _WHISPER_MODELS.get(selected_key)
+            if path and not path.exists():
+                messagebox.showerror(
+                    "モデルファイルなし",
+                    f"モデルファイルが見つかりません:\n{path.name}\n\n"
+                    f"whisper.cpp-windows-vulkan フォルダにダウンロードしてください。",
+                    parent=win,
+                )
+                return
+            self._on_apply(selected_key)
             win.destroy()
 
         tk.Button(btn_frame, text="適用", width=10, command=apply).pack(side=tk.LEFT, padx=6)
         tk.Button(btn_frame, text="キャンセル", width=10, command=win.destroy).pack(side=tk.LEFT, padx=6)
 
         win.update_idletasks()
-        # 画面中央に配置
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         w,  h  = win.winfo_reqwidth(),    win.winfo_reqheight()
         win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")

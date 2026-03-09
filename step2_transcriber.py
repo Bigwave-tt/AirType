@@ -193,6 +193,7 @@ class WhisperTranscriber:
             encoding="utf-8",
             errors="replace",
             timeout=self.timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW,  # コマンドプロンプトが点滅しないよう非表示
         )
 
         if result.returncode != 0:

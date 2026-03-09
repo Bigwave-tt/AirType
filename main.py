@@ -38,6 +38,7 @@ from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import RuleBasedRefiner
 from step4_paster import Paster
+from step5_gui import TrayIcon, SettingsWindow, HistoryWindow
 
 
 # ─────────────────────────────────────
@@ -301,13 +302,32 @@ class AirType:
         )
         self._ptt_hook.start()
 
+        # ── GUI コンポーネント ────────────────────────────
+        # 認識履歴 (どのスレッドからでも add() 可能)
+        self._history = HistoryWindow(root)
+
+        # 設定ウィンドウ (モデル変更コールバック付き)
+        self._settings = SettingsWindow(
+            master=root,
+            get_model=lambda: self.transcriber.model_key,
+            on_apply=self._change_model,
+        )
+
+        # システムトレイアイコン
+        self._tray = TrayIcon(
+            root=root,
+            on_settings=self._settings.show,
+            on_history=self._history.show,
+            on_quit=self.shutdown,
+        )
+
         # UI ポーリング開始 (50ms ごと)
         self._root.after(50, self._poll_ui_queue)
 
         print("\n" + "=" * 50)
         print("  AirType 起動完了")
         print(f"  PTT キー: 無変換 (VK=0x{PTT_KEY_VK:02X}) を押し続けて録音")
-        print("  終了: タスクマネージャーで終了 (コンソール起動時は Ctrl+C を2回)")
+        print("  終了: トレイアイコン右クリック → 終了")
         print("=" * 50 + "\n")
 
     # ── PTT イベント (PttHook スレッドから呼ばれる) ─────────────────────
@@ -325,6 +345,7 @@ class AirType:
 
         self.recorder.start()
         self._ui_queue.put("show")
+        self._ui_queue.put("tray_rec")
 
     def _handle_ptt_release(self):
         if not self._ptt_key_down:
@@ -338,6 +359,7 @@ class AirType:
         self._log_state("RECORDING → IDLE (WAV をキューに投入)")
 
         self._ui_queue.put("hide")
+        self._ui_queue.put("tray_idle")
 
         # キーリスナーをブロックしないよう別スレッドで停止・保存・投入
         threading.Thread(
@@ -348,7 +370,7 @@ class AirType:
 
     # ── UI ポーリング (メインスレッド) ─────────────────────────────────
     def _poll_ui_queue(self):
-        """50ms ごとに UI キューを消化して OSD を更新する"""
+        """50ms ごとに UI キューを消化して OSD・トレイ・履歴を更新する"""
         try:
             while True:
                 cmd = self._ui_queue.get_nowait()
@@ -356,6 +378,12 @@ class AirType:
                     self._osd.show()
                 elif cmd == "hide":
                     self._osd.hide()
+                elif cmd == "tray_rec":
+                    self._tray.set_recording(True)
+                elif cmd == "tray_idle":
+                    self._tray.set_recording(False)
+                elif isinstance(cmd, tuple) and cmd[0] == "add_history":
+                    self._history.add(cmd[1])
         except queue.Empty:
             pass
         self._root.after(50, self._poll_ui_queue)
@@ -408,6 +436,9 @@ class AirType:
             self.paster.paste(refined_text)
             print(f"\n[AirType] 完了: {refined_text!r}\n")
 
+            # 4. 認識履歴に追加 (Worker スレッドから安全に呼べる)
+            self._ui_queue.put(("add_history", refined_text))
+
         except Exception as e:
             print(f"[AirType] パイプラインエラー: {e}")
 
@@ -420,6 +451,7 @@ class AirType:
     def shutdown(self):
         """フックを解除し、Queue に残った処理が終わるのを待ってから終了する"""
         print("[AirType] 終了処理中...")
+        self._tray.stop()
         self._ptt_hook.stop()
         self._wav_queue.put(_POISON_PILL)
         self._worker.join(timeout=10.0)
@@ -427,6 +459,17 @@ class AirType:
             self._root.quit()
         except Exception:
             pass
+
+    def _change_model(self, model_key: str):
+        """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）"""
+        def _do_change():
+            try:
+                print(f"[AirType] モデルを変更中: {model_key}")
+                self.transcriber = WhisperTranscriber(model=model_key)
+                print(f"[AirType] モデル変更完了: {model_key}")
+            except Exception as e:
+                print(f"[AirType] モデル変更失敗: {e}")
+        threading.Thread(target=_do_change, daemon=True, name="ModelChange").start()
 
     # ── ユーティリティ ─────────────────────────────────────────────────
     @staticmethod

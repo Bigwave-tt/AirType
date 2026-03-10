@@ -30,7 +30,7 @@ LLAMA_DIR = _HERE.parent / "llama.cpp-windows-vulkan"
 LLAMA_CLI = LLAMA_DIR / "llama-cli.exe"
 
 REFINER_MODELS = {
-    "qwen3.5-2b": LLAMA_DIR / "qwen3.5-2b-instruct-q5_k_m.gguf",
+    "qwen3.5-2b": LLAMA_DIR / "Qwen3.5-2B-Q5_K_M.gguf",
     "qwen3.5-4b": LLAMA_DIR / "qwen3.5-4b-instruct-q5_k_m.gguf",
 }
 DEFAULT_REFINER_MODEL = "qwen3.5-2b"

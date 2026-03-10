@@ -88,7 +88,7 @@ def _parse_llm_output(output: str) -> str:
     # プロンプトエコー対策: assistant ターンの開始以降を取得
     marker = "<|im_start|>assistant\n"
     if marker in output:
-        output = output.split(marker, 1)[1]
+        output = output.rsplit(marker, 1)[1]
 
     # EOS / 次のターン以降を切り捨て
     output = output.split("<|im_end|>")[0]

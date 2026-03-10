@@ -455,6 +455,7 @@ class AirType:
         self._ptt_hook.stop()
         self._wav_queue.put(_POISON_PILL)
         self._worker.join(timeout=10.0)
+        self.refiner.shutdown()
         try:
             self._root.quit()
         except Exception:

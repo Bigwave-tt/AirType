@@ -87,13 +87,17 @@ _FEW_SHOT_OUTPUT = (
 
 
 def _build_chatml(raw_text: str) -> str:
-    """ChatML 形式のプロンプト文字列を生成する（Few-shot 1件入り）"""
+    """ChatML 形式のプロンプト文字列を生成する（Few-shot 1件入り）。
+
+    アシスタントターンを <think>\\n\\n</think>\\n で始めることで
+    Qwen3 の思考モードをスキップさせる（空の think ブロックプレフィル）。
+    """
     return (
         f"<|im_start|>system\n{_SYSTEM_PROMPT}<|im_end|>\n"
         f"<|im_start|>user\n{_FEW_SHOT_INPUT}<|im_end|>\n"
-        f"<|im_start|>assistant\n{_FEW_SHOT_OUTPUT}<|im_end|>\n"
+        f"<|im_start|>assistant\n<think>\n\n</think>\n{_FEW_SHOT_OUTPUT}<|im_end|>\n"
         f"<|im_start|>user\n{raw_text}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
+        f"<|im_start|>assistant\n<think>\n\n</think>\n"
     )
 
 
@@ -110,7 +114,12 @@ def _parse_llm_output(output: str) -> str:
         output = output.rsplit(marker, 1)[1]
 
     output = output.split("<|im_end|>")[0]
+
+    # 閉じタグあり・なし両方の <think> ブロックを除去
     output = re.sub(r"<think>.*?</think>", "", output, flags=re.DOTALL)
+    if "<think>" in output:
+        # </think> が来ないまま打ち切られた場合 (トークン上限超過など)
+        output = output.split("<think>")[0]
 
     return output.strip()
 

@@ -2,7 +2,10 @@
 AirType - Step 2: whisper.cpp (Vulkan GPU) による音声→テキスト変換
 
 設計:
-- whisper-cli.exe を subprocess で呼び出す
+- whisper-server.exe が存在すればサーバーモード（推奨）
+  - アプリ起動時にサーバーをバックグラウンドで一度だけ起動
+  - 2回目以降の推論は HTTP API 経由で高速完了
+- whisper-server.exe がなければ whisper-cli.exe をサブプロセス呼び出し（フォールバック）
 - AMD RX 6600 の Vulkan バックエンドを使用 (ggml-vulkan.dll)
 - デフォルトモデル: kotoba-whisper-v2.0-q5_0 (日本語特化・高速・高精度)
 - transcribe() は WAV ファイルパスを受け取りテキスト文字列を返す
@@ -11,7 +14,8 @@ AirType - Step 2: whisper.cpp (Vulkan GPU) による音声→テキスト変換
   AirType/
     AirType/              ← このファイルがある場所
     whisper.cpp-windows-vulkan/
-      whisper-cli.exe
+      whisper-server.exe           ← 推奨 (サーバーモード用)
+      whisper-cli.exe              ← フォールバック (CLIモード用)
       ggml-kotoba-whisper-v2.0-q5_0.bin   ← 推奨 (速度・精度バランス・約538MB)
       ggml-kotoba-whisper-v2.0.bin         ← 量子化なし完全版 (最高精度・約1.52GB)
       ggml-large-v3.bin                    ← 汎用 (--model large-v3)
@@ -28,9 +32,14 @@ Kotoba-Whisper GGML ダウンロード (PowerShell):
     "https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-ggml/resolve/main/ggml-kotoba-whisper-v2.0.bin"
 """
 
+import json
 import re
+import socket
 import struct
 import subprocess
+import threading
+import time
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -40,8 +49,9 @@ from typing import Optional
 # ─────────────────────────────────────
 # このファイルから見た whisper.cpp フォルダの相対パス
 _HERE = Path(__file__).parent
-WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
-WHISPER_CLI = WHISPER_DIR / "whisper-cli.exe"
+WHISPER_DIR    = _HERE.parent / "whisper.cpp-windows-vulkan"
+WHISPER_SERVER = WHISPER_DIR / "whisper-server.exe"
+WHISPER_CLI    = WHISPER_DIR / "whisper-cli.exe"
 
 # 選択可能なモデル
 # kotoba-whisper-v2.0: デコーダー層を 32→2 に蒸留した日本語特化モデル
@@ -56,7 +66,7 @@ MODELS = {
 }
 DEFAULT_MODEL = "kotoba-q5"
 
-# モデル別タイムアウト (秒)
+# モデル別タイムアウト (秒) - CLIモード用 (モデルロード込み)
 # kotoba は軽量なので 30 秒で十分; large 系は 120 秒
 MODEL_TIMEOUTS = {
     "kotoba-q5":   30,
@@ -73,7 +83,12 @@ DEFAULT_LANGUAGE = "ja"
 # 例: 「軌道」→「起動」、「記録」→「録音」 等
 INITIAL_PROMPT = "日本語の音声入力です。"
 
-# タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト
+# サーバーモード設定
+_WHISPER_SERVER_PORT    = 18766  # whisper-server 用ポート (llama-server の 18765 と競合しない)
+_STARTUP_TIMEOUT        = 60     # サーバー起動・モデルロード完了までの待機上限 (秒)
+_INFER_TIMEOUT          = 30     # サーバーモードの推論タイムアウト (秒)
+
+# タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト (CLIモード用)
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
 
 # whisper.cpp が出力するゴミトークンのパターン (短い音声や無音入力時に発生)
@@ -99,7 +114,10 @@ _NOISE_RE = re.compile(
 # ─────────────────────────────────────
 class WhisperTranscriber:
     """
-    whisper-cli.exe (Vulkan GPU) をラップして WAV → テキスト変換を行う。
+    whisper-server.exe または whisper-cli.exe (Vulkan GPU) をラップして WAV → テキスト変換を行う。
+
+    whisper-server.exe が存在すればサーバーモード（高速）、
+    whisper-cli.exe のみならば CLI サブプロセスモード（互換）で動作する。
 
     Parameters
     ----------
@@ -116,18 +134,16 @@ class WhisperTranscriber:
         device: str = "auto",
     ):
         self.language = language
+        self._server_proc  = None
+        self._server_ready = threading.Event()
+        self._use_server   = False
 
         if model not in MODELS:
             raise ValueError(f"model は {list(MODELS)} のいずれかを指定してください: {model!r}")
-        self.model_key = model
+        self.model_key  = model
         self.model_path = MODELS[model]
-        self.timeout = MODEL_TIMEOUTS[model]
+        self.timeout    = MODEL_TIMEOUTS[model]
 
-        if not WHISPER_CLI.exists():
-            raise FileNotFoundError(
-                f"whisper-cli.exe が見つかりません: {WHISPER_CLI}\n"
-                f"whisper.cpp-windows-vulkan フォルダを AirType フォルダと同じ場所に置いてください。"
-            )
         if not self.model_path.exists():
             _kotoba_hints = {
                 "kotoba-q5":   (
@@ -150,12 +166,75 @@ class WhisperTranscriber:
                 f"モデルファイルが見つかりません: {self.model_path}\n{hint}"
             )
 
+        # ── サーバーモード優先 ────────────────────────────────────────
+        if WHISPER_SERVER.exists():
+            self._use_server = True
+            print(f"[Transcriber] whisper-server.exe: {WHISPER_SERVER}")
+            print(f"[Transcriber] モデル: {self.model_path.name}")
+            print(f"[Transcriber] バックグラウンドでサーバーを起動中... (ポート {_WHISPER_SERVER_PORT})")
+            threading.Thread(
+                target=self._start_server,
+                daemon=True,
+                name="WhisperServer",
+            ).start()
+            return
+
+        # ── CLI サブプロセスモード（フォールバック）──────────────────
+        if not WHISPER_CLI.exists():
+            raise FileNotFoundError(
+                f"whisper-server.exe も whisper-cli.exe も見つかりません: {WHISPER_DIR}\n"
+                f"whisper.cpp-windows-vulkan フォルダを AirType フォルダと同じ場所に置いてください。"
+            )
+
         print(f"[Transcriber] whisper-cli.exe: {WHISPER_CLI}")
         print(f"[Transcriber] モデル: {self.model_path.name}")
         print(f"[Transcriber] タイムアウト: {self.timeout}秒")
         print(f"[Transcriber] バックエンド: Vulkan (AMD RX 6600)")
         print("[Transcriber] 準備完了")
 
+    # ── サーバー起動（バックグラウンドスレッドで実行）────────────────
+    def _start_server(self):
+        """whisper-server.exe をバックグラウンド起動し、ポート接続確認で準備完了を待つ。"""
+        cmd = [
+            str(WHISPER_SERVER),
+            "-m",     str(self.model_path),
+            "--port", str(_WHISPER_SERVER_PORT),
+            "--host", "127.0.0.1",
+        ]
+        try:
+            self._server_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception as e:
+            print(f"[Transcriber] サーバー起動失敗: {e}")
+            self._use_server = False
+            return
+
+        deadline = time.time() + _STARTUP_TIMEOUT
+        while time.time() < deadline:
+            # プロセスが早期終了していたら失敗
+            if self._server_proc.poll() is not None:
+                print("[Transcriber] whisper-server が予期せず終了しました")
+                self._use_server = False
+                return
+            try:
+                with socket.create_connection(("127.0.0.1", _WHISPER_SERVER_PORT), timeout=1):
+                    print("[Transcriber] whisper-server 準備完了（以降の推論は高速になります）")
+                    self._server_ready.set()
+                    return
+            except (ConnectionRefusedError, OSError):
+                pass
+            time.sleep(1.0)
+
+        print(f"[Transcriber] whisper-server が {_STARTUP_TIMEOUT}秒 以内に起動しませんでした")
+        self._server_proc.terminate()
+        self._server_proc = None
+        self._use_server  = False
+
+    # ── 公開 API ─────────────────────────────────────────────────────
     def transcribe(self, wav_path: Path) -> str:
         """
         WAV ファイルを文字起こしして結合テキストを返す。
@@ -176,6 +255,111 @@ class WhisperTranscriber:
         print(f"[Transcriber] 文字起こし開始: {wav_path.name}")
         self._check_audio_level(wav_path)
 
+        if self._use_server:
+            return self._transcribe_server(wav_path)
+        return self._transcribe_cli(wav_path)
+
+    def shutdown(self):
+        """サーバープロセスを終了する（アプリ終了時に呼ぶ）。"""
+        if self._server_proc and self._server_proc.poll() is None:
+            print("[Transcriber] whisper-server 終了中...")
+            self._server_proc.terminate()
+            try:
+                self._server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._server_proc.kill()
+            print("[Transcriber] whisper-server 終了しました")
+        self._server_proc = None
+
+    # ── 内部メソッド: サーバーモード ─────────────────────────────────
+    def _transcribe_server(self, wav_path: Path) -> str:
+        """whisper-server HTTP API 経由で文字起こしを行う。"""
+        # サーバーが準備完了するまで待機
+        if not self._server_ready.wait(timeout=_STARTUP_TIMEOUT):
+            print("[Transcriber] サーバー準備待機タイムアウト。CLIモードにフォールバック")
+            return self._transcribe_cli(wav_path)
+
+        print(f"[Transcriber] 文字起こし開始 (サーバー): {wav_path.name}")
+        try:
+            response = self._send_multipart(wav_path)
+            full_text = self._parse_server_response(response)
+        except Exception as e:
+            print(f"[Transcriber] サーバーエラー ({type(e).__name__}): {e}。CLIにフォールバック")
+            return self._transcribe_cli(wav_path)
+
+        if not full_text:
+            print("[Transcriber] WARNING: テキストが取得できませんでした")
+
+        print(f"[Transcriber] 文字起こし結果:\n  → {full_text!r}")
+        return full_text
+
+    def _send_multipart(self, wav_path: Path) -> dict:
+        """WAV ファイルをマルチパート POST で whisper-server に送信し JSON を返す。"""
+        boundary = "----AirTypeWhisperBoundary"
+        audio_bytes = wav_path.read_bytes()
+        filename = wav_path.name
+
+        # multipart/form-data ボディを手動構築
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: audio/wav\r\n"
+            f"\r\n"
+        ).encode("utf-8") + audio_bytes + (
+            f"\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="language"\r\n'
+            f"\r\n"
+            f"{self.language or 'auto'}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="prompt"\r\n'
+            f"\r\n"
+            f"{INITIAL_PROMPT}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="response_format"\r\n'
+            f"\r\n"
+            f"verbose_json\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{_WHISPER_SERVER_PORT}/inference",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_INFER_TIMEOUT) as resp:
+            return json.loads(resp.read())
+
+    @staticmethod
+    def _parse_server_response(response: dict) -> str:
+        """
+        whisper-server の verbose_json レスポンスからテキストを抽出する。
+
+        segments がある場合はセグメント単位でノイズフィルタを適用。
+        segments がない場合は text フィールドを使用。
+        """
+        segments = response.get("segments", [])
+        if segments:
+            texts = []
+            for seg in segments:
+                text = seg.get("text", "").strip()
+                if text and not _NOISE_RE.search(text):
+                    texts.append(text)
+            return "".join(texts)
+
+        # segments がない場合は text フィールド全体を使用
+        return response.get("text", "").strip()
+
+    # ── 内部メソッド: CLI サブプロセスモード ─────────────────────────
+    def _transcribe_cli(self, wav_path: Path) -> str:
+        """whisper-cli.exe サブプロセス経由で文字起こしを行う。"""
+        if not WHISPER_CLI.exists():
+            raise FileNotFoundError(
+                f"whisper-cli.exe が見つかりません: {WHISPER_CLI}"
+            )
+
+        print(f"[Transcriber] 文字起こし開始 (CLI): {wav_path.name}")
         cmd = [
             str(WHISPER_CLI),
             "-m", str(self.model_path),
@@ -201,7 +385,7 @@ class WhisperTranscriber:
                 f"whisper-cli.exe が失敗しました (code={result.returncode}):\n{result.stderr}"
             )
 
-        full_text = self._parse_output(result.stdout)
+        full_text = self._parse_cli_output(result.stdout)
         if not full_text:
             print("[Transcriber] WARNING: テキストが取得できませんでした")
             print(f"[Transcriber] DEBUG returncode: {result.returncode}")
@@ -232,7 +416,7 @@ class WhisperTranscriber:
             pass  # 音量チェック失敗は無視
 
     @staticmethod
-    def _parse_output(output: str) -> str:
+    def _parse_cli_output(output: str) -> str:
         """
         whisper-cli.exe の出力からテキスト部分を抽出して結合する。
 
@@ -258,6 +442,7 @@ def _test_with_existing_file(wav_path: str, model: str = DEFAULT_MODEL):
     transcriber = WhisperTranscriber(model=model)
     text = transcriber.transcribe(Path(wav_path))
     print(f"\n結果: {text}")
+    transcriber.shutdown()
 
 
 if __name__ == "__main__":

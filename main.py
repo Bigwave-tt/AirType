@@ -455,6 +455,7 @@ class AirType:
         self._ptt_hook.stop()
         self._wav_queue.put(_POISON_PILL)
         self._worker.join(timeout=10.0)
+        self.transcriber.shutdown()
         self.refiner.shutdown()
         try:
             self._root.quit()
@@ -466,7 +467,9 @@ class AirType:
         def _do_change():
             try:
                 print(f"[AirType] モデルを変更中: {model_key}")
+                old = self.transcriber
                 self.transcriber = WhisperTranscriber(model=model_key)
+                old.shutdown()
                 print(f"[AirType] モデル変更完了: {model_key}")
             except Exception as e:
                 print(f"[AirType] モデル変更失敗: {e}")

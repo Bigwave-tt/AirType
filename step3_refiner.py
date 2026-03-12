@@ -62,12 +62,14 @@ MODEL_TIMEOUTS = {
 }
 
 # 非思考モード誘導サンプリングパラメータ (Qwen 3 系共通)
-_TEMP   = "0.1"   # より決定論的に（文変更リスクを下げる）
-_TOP_P  = "0.8"
-_TOP_K  = "20"
-_N_GPU  = "99"    # Vulkan GPU へのオフロード層数
-_N_CTX  = "512"   # コンテキスト長（リファイナー用途は ~430トークン以内で十分、KV キャッシュ削減のため縮小）
-_N_PRED = "256"   # 最大生成トークン数
+_TEMP          = "0.1"    # より決定論的に（文変更リスクを下げる）
+_TOP_P         = "0.8"
+_TOP_K         = "20"
+_REPEAT_PENALTY = "1.15"  # 繰り返しループ防止（1.0=無効, 1.1〜1.3 が一般的）
+_REPEAT_LAST_N  = "64"    # 繰り返しチェック対象のトークン数
+_N_GPU         = "99"     # Vulkan GPU へのオフロード層数
+_N_CTX         = "512"    # コンテキスト長（リファイナー用途は ~430トークン以内で十分）
+_N_PRED        = "256"    # 最大生成トークン数
 
 _SYSTEM_PROMPT = (
     "あなたは音声認識テキストの最小限の校正アシスタントです。"
@@ -309,12 +311,14 @@ class LlamaRefiner:
 
         prompt  = _build_chatml(raw_text)
         payload = json.dumps({
-            "prompt":      prompt,
-            "n_predict":   int(_N_PRED),
-            "temperature": float(_TEMP),
-            "top_p":       float(_TOP_P),
-            "top_k":       int(_TOP_K),
-            "stop":        ["<|im_end|>"],
+            "prompt":         prompt,
+            "n_predict":      int(_N_PRED),
+            "temperature":    float(_TEMP),
+            "top_p":          float(_TOP_P),
+            "top_k":          int(_TOP_K),
+            "repeat_penalty": float(_REPEAT_PENALTY),
+            "repeat_last_n":  int(_REPEAT_LAST_N),
+            "stop":           ["<|im_end|>"],
         }).encode("utf-8")
 
         req = urllib.request.Request(
@@ -342,14 +346,16 @@ class LlamaRefiner:
         prompt = _build_chatml(raw_text)
         cmd = [
             str(LLAMA_CLI),
-            "-m",       str(self._model_path),
-            "-p",       prompt,
-            "-n",       _N_PRED,
-            "-c",       _N_CTX,
-            "--temp",   _TEMP,
-            "--top-p",  _TOP_P,
-            "--top-k",  _TOP_K,
-            "-ngl",     _N_GPU,
+            "-m",                str(self._model_path),
+            "-p",                prompt,
+            "-n",                _N_PRED,
+            "-c",                _N_CTX,
+            "--temp",            _TEMP,
+            "--top-p",           _TOP_P,
+            "--top-k",           _TOP_K,
+            "--repeat-penalty",  _REPEAT_PENALTY,
+            "--repeat-last-n",   _REPEAT_LAST_N,
+            "-ngl",              _N_GPU,
             "--log-disable",
         ]
 

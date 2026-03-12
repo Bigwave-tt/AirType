@@ -26,6 +26,7 @@ RuleBasedRefiner: 正規表現によるフィラー除去 [フォールバック
       qwen3.5-4b-instruct-q5_k_m.gguf   ← 高精度 (約4GB)
 """
 
+import difflib
 import json
 import re
 import subprocess
@@ -102,6 +103,31 @@ def _build_chatml(raw_text: str) -> str:
         f"<|im_start|>user\n{raw_text}<|im_end|>\n"
         f"<|im_start|>assistant\n<think>\n\n</think>\n"
     )
+
+
+def _is_faithful(raw: str, refined: str, threshold: float = 0.70) -> bool:
+    """
+    LLM の出力が入力テキストに対して忠実かどうかを判定する。
+
+    句読点・空白を除いたテキストで SequenceMatcher の類似度を計算し、
+    threshold を下回ったら「過剰編集」と判断して False を返す。
+
+    フィラー削除や句読点追加程度の変更は許容する（ratio ≈ 0.8〜1.0）。
+    文の書き換えや削除は拒否する（ratio < 0.70 が多い）。
+    """
+    def _strip(text: str) -> str:
+        return re.sub(r"[、。・\s　]", "", text)
+
+    raw_s     = _strip(raw)
+    refined_s = _strip(refined)
+
+    if not raw_s:
+        return True  # 元テキストが空なら判定不要
+
+    ratio = difflib.SequenceMatcher(None, raw_s, refined_s).ratio()
+    if ratio < threshold:
+        print(f"[Refiner] 忠実度チェック: ratio={ratio:.2f} < {threshold} → 過剰編集と判定")
+    return ratio >= threshold
 
 
 def _parse_llm_output(output: str) -> str:
@@ -248,11 +274,19 @@ class LlamaRefiner:
 
         try:
             if self._use_server:
-                return self._llm_refine_server(raw_text)
-            return self._llm_refine_cli(raw_text)
+                refined = self._llm_refine_server(raw_text)
+            else:
+                refined = self._llm_refine_cli(raw_text)
         except Exception as e:
             print(f"[Refiner] エラー ({type(e).__name__}): {e}。ルールベースにフォールバックします")
             return self._fallback.refine(raw_text)
+
+        # 過剰編集チェック: 元テキストとの類似度が低い場合はルールベースに差し替え
+        if not _is_faithful(raw_text, refined):
+            print("[Refiner] 過剰編集を検出。ルールベース結果を使用します")
+            return self._fallback.refine(raw_text)
+
+        return refined
 
     def shutdown(self):
         """サーバープロセスを終了する（アプリ終了時に呼ぶ）。"""

@@ -132,8 +132,10 @@ class WhisperTranscriber:
         language: Optional[str] = DEFAULT_LANGUAGE,
         model: str = DEFAULT_MODEL,
         device: str = "auto",
+        startup_gate: Optional[threading.Event] = None,
     ):
         self.language = language
+        self._startup_gate = startup_gate  # このイベントが set されるまでサーバー起動を遅延
         self._server_proc  = None
         self._server_ready = threading.Event()
         self._use_server   = False
@@ -195,6 +197,13 @@ class WhisperTranscriber:
     # ── サーバー起動（バックグラウンドスレッドで実行）────────────────
     def _start_server(self):
         """whisper-server.exe をバックグラウンド起動し、ポート接続確認で準備完了を待つ。"""
+        # llama-server が先に VRAM を確保するまで待機する
+        # （同時起動すると whisper-server が先に VRAM を取り llama-server が shared メモリに溢れる）
+        if self._startup_gate is not None:
+            print("[Transcriber] llama-server の VRAM 確保完了を待機中...")
+            self._startup_gate.wait(timeout=_STARTUP_TIMEOUT)
+            print("[Transcriber] llama-server 準備完了を確認。whisper-server を起動します。")
+
         cmd = [
             str(WHISPER_SERVER),
             "-m",     str(self.model_path),

@@ -272,9 +272,13 @@ class AirType:
         self._root = root
 
         # 各モジュール初期化
-        self.recorder    = Recorder()
-        self.transcriber = WhisperTranscriber()
-        self.refiner     = LlamaRefiner()
+        # 起動順: refiner → transcriber の順で VRAM を優先確保させる
+        # llama-server がサーバーモードの場合、その準備完了イベントをゲートとして渡す
+        # → whisper-server は llama-server のロード完了後に起動し VRAM 競合を回避する
+        self.recorder = Recorder()
+        self.refiner  = LlamaRefiner()
+        _whisper_gate = self.refiner._server_ready if self.refiner._use_server else None
+        self.transcriber = WhisperTranscriber(startup_gate=_whisper_gate)
         self.paster      = Paster()
 
         # 状態管理

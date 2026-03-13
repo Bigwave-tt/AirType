@@ -3,7 +3,7 @@
 
   "network": {
     "_comment_server_url": "client.py が接続するサーバーのURL",
-    "server_url": "http://192.168.1.100:8000/dictate",
+    "server_url": "http://192.168.68.75:8000/dictate",
 
     "_comment_host": "api_server.py がリッスンするアドレス (0.0.0.0=全IF, 127.0.0.1=ローカルのみ)",
     "host": "0.0.0.0",

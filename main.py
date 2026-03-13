@@ -34,6 +34,7 @@ import tkinter as tk
 from enum import Enum, auto
 from pathlib import Path
 
+import config as _config
 from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
@@ -271,15 +272,28 @@ class AirType:
 
         self._root = root
 
+        # 設定読み込み
+        _cfg         = _config.load()
+        _whisper_cfg = _cfg["whisper"]
+        _llama_cfg   = _cfg["llama"]
+        _whisper_dir = _config.resolve_dir(_whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
+        _llama_dir   = _config.resolve_dir(_llama_cfg["dir"],   "llama.cpp-windows-vulkan")
+        _whisper_port = _config.resolve_port(int(_whisper_cfg["server_port"]))
+        _llama_port   = _config.resolve_port(int(_llama_cfg["server_port"]))
+
         # 各モジュール初期化
         # 起動順: refiner → transcriber の順で VRAM を優先確保させる
         # llama-server がサーバーモードの場合、その準備完了イベントをゲートとして渡す
         # → whisper-server は llama-server のロード完了後に起動し VRAM 競合を回避する
         self.recorder = Recorder()
-        self.refiner  = LlamaRefiner()
+        self.refiner  = LlamaRefiner(llama_dir=_llama_dir, server_port=_llama_port)
         _whisper_gate = self.refiner._server_ready if self.refiner._use_server else None
-        self.transcriber = WhisperTranscriber(startup_gate=_whisper_gate)
-        self.paster      = Paster()
+        self.transcriber = WhisperTranscriber(
+            startup_gate=_whisper_gate,
+            whisper_dir=_whisper_dir,
+            server_port=_whisper_port,
+        )
+        self.paster = Paster()
 
         # 状態管理
         self.state         = State.IDLE

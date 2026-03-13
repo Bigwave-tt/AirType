@@ -17,6 +17,8 @@ import time
 import pyperclip
 from pynput.keyboard import Controller, Key
 
+import ime as _ime_module
+
 
 # ─────────────────────────────────────
 # 定数
@@ -24,44 +26,6 @@ from pynput.keyboard import Controller, Key
 CLIPBOARD_SYNC_DELAY = 0.25   # クリップボードへのコピー後、ペーストまでの待機時間 (秒)
 POST_PASTE_DELAY = 0.3        # ペースト後の安定待ち (ターゲットアプリが取り込む時間)
 CLIPBOARD_RETRY_MAX = 2       # クリップボード書き込みの最大リトライ回数
-
-
-# ─────────────────────────────────────
-# IME制御 (Windows専用)
-# ─────────────────────────────────────
-def _get_ime_state() -> bool | None:
-    """
-    現在のフォアグラウンドウィンドウのIME状態を取得する。
-    Windows以外はNoneを返す。
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
-        himc = ctypes.windll.imm32.ImmGetContext(hwnd)
-        state = ctypes.windll.imm32.ImmGetOpenStatus(himc)
-        ctypes.windll.imm32.ImmReleaseContext(hwnd, himc)
-        return bool(state)
-    except Exception:
-        return None
-
-
-def _set_ime_state(enabled: bool) -> None:
-    """
-    フォアグラウンドウィンドウのIME状態を設定する。
-    Windows以外は何もしない。
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
-        himc = ctypes.windll.imm32.ImmGetContext(hwnd)
-        ctypes.windll.imm32.ImmSetOpenStatus(himc, 1 if enabled else 0)
-        ctypes.windll.imm32.ImmReleaseContext(hwnd, himc)
-    except Exception:
-        pass
 
 
 # ─────────────────────────────────────
@@ -82,6 +46,7 @@ class Paster:
     def __init__(self):
         self._keyboard = Controller()
         self._modifier_key = self._detect_modifier_key()
+        self._ime = _ime_module.get_controller()
         print(f"[Paster] 初期化完了  ペーストキー: {self._modifier_key}+v")
 
     @staticmethod
@@ -126,9 +91,9 @@ class Paster:
             return
 
         # 2. IMEを一時無効化
-        ime_was_open = _get_ime_state()
+        ime_was_open = self._ime.get_state()
         if ime_was_open:
-            _set_ime_state(False)
+            self._ime.set_state(False)
             print("[Paster] IMEを無効化")
 
         try:
@@ -144,7 +109,7 @@ class Paster:
         finally:
             # 5. IMEを元の状態に復元
             if ime_was_open:
-                _set_ime_state(True)
+                self._ime.set_state(True)
                 print("[Paster] IMEを復元")
 
     def copy_only(self, text: str):

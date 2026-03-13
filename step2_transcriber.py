@@ -47,23 +47,25 @@ from typing import Optional
 # ─────────────────────────────────────
 # 定数
 # ─────────────────────────────────────
-# このファイルから見た whisper.cpp フォルダの相対パス
+# このファイルから見た whisper.cpp フォルダのデフォルト相対パス
 _HERE = Path(__file__).parent
-WHISPER_DIR    = _HERE.parent / "whisper.cpp-windows-vulkan"
+_DEFAULT_WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
+
+# モデルのファイル名（ whisper dir からの相対）
+_MODEL_FILES = {
+    "kotoba-q5":   "ggml-kotoba-whisper-v2.0-q5_0.bin",   # 推奨: 速度・精度バランス (~538MB)
+    "kotoba-full": "ggml-kotoba-whisper-v2.0.bin",          # 最高精度: 量子化なし (~1.52GB)
+    "large-v3":    "ggml-large-v3.bin",                     # 汎用: 量子化なし (最も遅い)
+    "accurate":    "ggml-large-v3-q5_0.bin",                # 汎用: 量子化あり (遅い)
+    "turbo":       "ggml-large-v3-turbo-q5_0.bin",          # 汎用: 高速 (やや低精度)
+}
+
+# 後方互換性のためモジュールレベルでも公開（デフォルトパスを使用）
+WHISPER_DIR    = _DEFAULT_WHISPER_DIR
 WHISPER_SERVER = WHISPER_DIR / "whisper-server.exe"
 WHISPER_CLI    = WHISPER_DIR / "whisper-cli.exe"
+MODELS = {k: WHISPER_DIR / v for k, v in _MODEL_FILES.items()}
 
-# 選択可能なモデル
-# kotoba-whisper-v2.0: デコーダー層を 32→2 に蒸留した日本語特化モデル
-#   - 本家 large-v3 と同等の日本語精度
-#   - モデルが軽いためタイムアウトリスクが物理的に消滅
-MODELS = {
-    "kotoba-q5":   WHISPER_DIR / "ggml-kotoba-whisper-v2.0-q5_0.bin",  # 推奨: 速度・精度バランス (~538MB)
-    "kotoba-full": WHISPER_DIR / "ggml-kotoba-whisper-v2.0.bin",        # 最高精度: 量子化なし (~1.52GB)
-    "large-v3":    WHISPER_DIR / "ggml-large-v3.bin",                   # 汎用: 量子化なし (最も遅い)
-    "accurate":    WHISPER_DIR / "ggml-large-v3-q5_0.bin",              # 汎用: 量子化あり (遅い)
-    "turbo":       WHISPER_DIR / "ggml-large-v3-turbo-q5_0.bin",        # 汎用: 高速 (やや低精度)
-}
 DEFAULT_MODEL = "kotoba-q5"
 
 # モデル別タイムアウト (秒) - CLIモード用 (モデルロード込み)
@@ -84,9 +86,9 @@ DEFAULT_LANGUAGE = "ja"
 INITIAL_PROMPT = "日本語の音声入力です。"
 
 # サーバーモード設定
-_WHISPER_SERVER_PORT    = 18766  # whisper-server 用ポート (llama-server の 18765 と競合しない)
-_STARTUP_TIMEOUT        = 60     # サーバー起動・モデルロード完了までの待機上限 (秒)
-_INFER_TIMEOUT          = 30     # サーバーモードの推論タイムアウト (秒)
+_DEFAULT_WHISPER_SERVER_PORT = 18766  # デフォルトポート (config で上書き可)
+_STARTUP_TIMEOUT             = 60     # サーバー起動・モデルロード完了までの待機上限 (秒)
+_INFER_TIMEOUT               = 30     # サーバーモードの推論タイムアウト (秒)
 
 # タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト (CLIモード用)
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
@@ -133,17 +135,42 @@ class WhisperTranscriber:
         model: str = DEFAULT_MODEL,
         device: str = "auto",
         startup_gate: Optional[threading.Event] = None,
+        whisper_dir: Optional[Path] = None,
+        server_port: Optional[int] = None,
     ):
+        """
+        Parameters
+        ----------
+        whisper_dir : Path | None
+            whisper.cpp フォルダのパス。None の場合はデフォルト相対パスを使用。
+        server_port : int | None
+            whisper-server が使用するポート。None の場合はデフォルト値を使用。0 で空きポート自動割り当て。
+        """
         self.language = language
         self._startup_gate = startup_gate  # このイベントが set されるまでサーバー起動を遅延
         self._server_proc  = None
         self._server_ready = threading.Event()
         self._use_server   = False
 
-        if model not in MODELS:
-            raise ValueError(f"model は {list(MODELS)} のいずれかを指定してください: {model!r}")
+        # ── パス解決 ──────────────────────────────────────────────────
+        _dir = Path(whisper_dir) if whisper_dir else _DEFAULT_WHISPER_DIR
+        self._whisper_server = _dir / "whisper-server.exe"
+        self._whisper_cli    = _dir / "whisper-cli.exe"
+
+        # ── ポート解決 ────────────────────────────────────────────────
+        _port_cfg = server_port if server_port is not None else _DEFAULT_WHISPER_SERVER_PORT
+        if _port_cfg == 0:
+            import socket as _sock
+            with _sock.socket() as s:
+                s.bind(("", 0))
+                _port_cfg = s.getsockname()[1]
+            print(f"[Transcriber] 空きポートを自動割り当て: {_port_cfg}")
+        self._server_port = _port_cfg
+
+        if model not in _MODEL_FILES:
+            raise ValueError(f"model は {list(_MODEL_FILES)} のいずれかを指定してください: {model!r}")
         self.model_key  = model
-        self.model_path = MODELS[model]
+        self.model_path = _dir / _MODEL_FILES[model]
         self.timeout    = MODEL_TIMEOUTS[model]
 
         if not self.model_path.exists():
@@ -169,11 +196,11 @@ class WhisperTranscriber:
             )
 
         # ── サーバーモード優先 ────────────────────────────────────────
-        if WHISPER_SERVER.exists():
+        if self._whisper_server.exists():
             self._use_server = True
-            print(f"[Transcriber] whisper-server.exe: {WHISPER_SERVER}")
+            print(f"[Transcriber] whisper-server.exe: {self._whisper_server}")
             print(f"[Transcriber] モデル: {self.model_path.name}")
-            print(f"[Transcriber] バックグラウンドでサーバーを起動中... (ポート {_WHISPER_SERVER_PORT})")
+            print(f"[Transcriber] バックグラウンドでサーバーを起動中... (ポート {self._server_port})")
             threading.Thread(
                 target=self._start_server,
                 daemon=True,
@@ -182,13 +209,13 @@ class WhisperTranscriber:
             return
 
         # ── CLI サブプロセスモード（フォールバック）──────────────────
-        if not WHISPER_CLI.exists():
+        if not self._whisper_cli.exists():
             raise FileNotFoundError(
-                f"whisper-server.exe も whisper-cli.exe も見つかりません: {WHISPER_DIR}\n"
+                f"whisper-server.exe も whisper-cli.exe も見つかりません: {_dir}\n"
                 f"whisper.cpp-windows-vulkan フォルダを AirType フォルダと同じ場所に置いてください。"
             )
 
-        print(f"[Transcriber] whisper-cli.exe: {WHISPER_CLI}")
+        print(f"[Transcriber] whisper-cli.exe: {self._whisper_cli}")
         print(f"[Transcriber] モデル: {self.model_path.name}")
         print(f"[Transcriber] タイムアウト: {self.timeout}秒")
         print(f"[Transcriber] バックエンド: Vulkan (AMD RX 6600)")
@@ -205,9 +232,9 @@ class WhisperTranscriber:
             print("[Transcriber] llama-server 準備完了を確認。whisper-server を起動します。")
 
         cmd = [
-            str(WHISPER_SERVER),
+            str(self._whisper_server),
             "-m",     str(self.model_path),
-            "--port", str(_WHISPER_SERVER_PORT),
+            "--port", str(self._server_port),
             "--host", "127.0.0.1",
         ]
         try:
@@ -230,7 +257,7 @@ class WhisperTranscriber:
                 self._use_server = False
                 return
             try:
-                with socket.create_connection(("127.0.0.1", _WHISPER_SERVER_PORT), timeout=1):
+                with socket.create_connection(("127.0.0.1", self._server_port), timeout=1):
                     print("[Transcriber] whisper-server 準備完了（以降の推論は高速になります）")
                     self._server_ready.set()
                     return
@@ -332,7 +359,7 @@ class WhisperTranscriber:
         ).encode("utf-8")
 
         req = urllib.request.Request(
-            f"http://127.0.0.1:{_WHISPER_SERVER_PORT}/inference",
+            f"http://127.0.0.1:{self._server_port}/inference",
             data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
@@ -363,14 +390,14 @@ class WhisperTranscriber:
     # ── 内部メソッド: CLI サブプロセスモード ─────────────────────────
     def _transcribe_cli(self, wav_path: Path) -> str:
         """whisper-cli.exe サブプロセス経由で文字起こしを行う。"""
-        if not WHISPER_CLI.exists():
+        if not self._whisper_cli.exists():
             raise FileNotFoundError(
-                f"whisper-cli.exe が見つかりません: {WHISPER_CLI}"
+                f"whisper-cli.exe が見つかりません: {self._whisper_cli}"
             )
 
         print(f"[Transcriber] 文字起こし開始 (CLI): {wav_path.name}")
         cmd = [
-            str(WHISPER_CLI),
+            str(self._whisper_cli),
             "-m", str(self.model_path),
             "-f", str(wav_path),
             "-l", self.language or "auto",

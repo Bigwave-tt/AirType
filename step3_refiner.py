@@ -39,21 +39,27 @@ from pathlib import Path
 # ─────────────────────────────────────
 # 定数
 # ─────────────────────────────────────
-_HERE     = Path(__file__).parent
-LLAMA_DIR = _HERE.parent / "llama.cpp-windows-vulkan"
+_HERE             = Path(__file__).parent
+_DEFAULT_LLAMA_DIR = _HERE.parent / "llama.cpp-windows-vulkan"
+
+# モデルのファイル名（llama dir からの相対）
+_MODEL_FILES_REFINER = {
+    "qwen3.5-2b": "Qwen3.5-2B-Q5_K_M.gguf",
+    "qwen3.5-4b": "qwen3.5-4b-instruct-q5_k_m.gguf",
+}
+
+# 後方互換性のためモジュールレベルでも公開（デフォルトパスを使用）
+LLAMA_DIR    = _DEFAULT_LLAMA_DIR
 LLAMA_CLI    = LLAMA_DIR / "llama-cli.exe"
 LLAMA_SERVER = LLAMA_DIR / "llama-server.exe"
+REFINER_MODELS = {k: LLAMA_DIR / v for k, v in _MODEL_FILES_REFINER.items()}
 
-REFINER_MODELS = {
-    "qwen3.5-2b": LLAMA_DIR / "Qwen3.5-2B-Q5_K_M.gguf",
-    "qwen3.5-4b": LLAMA_DIR / "qwen3.5-4b-instruct-q5_k_m.gguf",
-}
 DEFAULT_REFINER_MODEL = "qwen3.5-2b"
 
 # サーバーモード設定
-_SERVER_PORT     = 18765   # llama-server 用ポート（競合しにくい番号）
-_STARTUP_TIMEOUT = 90      # サーバー起動・モデルロード完了までの待機上限 (秒)
-_INFER_TIMEOUT   = 15      # サーバーモードの推論タイムアウト (秒)
+_DEFAULT_SERVER_PORT = 18765   # デフォルトポート (config で上書き可)
+_STARTUP_TIMEOUT     = 90      # サーバー起動・モデルロード完了までの待機上限 (秒)
+_INFER_TIMEOUT       = 15      # サーバーモードの推論タイムアウト (秒)
 
 # CLIモードのタイムアウト（モデルロード込みのため余裕を持たせる）
 MODEL_TIMEOUTS = {
@@ -172,7 +178,20 @@ class LlamaRefiner:
         使用するモデルキー。REFINER_MODELS のいずれか。
     """
 
-    def __init__(self, model: str = DEFAULT_REFINER_MODEL):
+    def __init__(
+        self,
+        model: str = DEFAULT_REFINER_MODEL,
+        llama_dir=None,
+        server_port=None,
+    ):
+        """
+        Parameters
+        ----------
+        llama_dir : Path | str | None
+            llama.cpp フォルダのパス。None の場合はデフォルト相対パスを使用。
+        server_port : int | None
+            llama-server が使用するポート。None の場合はデフォルト値を使用。0 で空きポート自動割り当て。
+        """
         self._fallback     = RuleBasedRefiner()
         self._available    = False
         self._server_proc  = None
@@ -180,7 +199,27 @@ class LlamaRefiner:
         self._use_server   = False
         self.model_key     = model
 
-        model_path = REFINER_MODELS.get(model)
+        # ── パス解決 ──────────────────────────────────────────────────
+        from pathlib import Path as _Path
+        _dir = _Path(llama_dir) if llama_dir else _DEFAULT_LLAMA_DIR
+        self._llama_server = _dir / "llama-server.exe"
+        self._llama_cli    = _dir / "llama-cli.exe"
+
+        # ── ポート解決 ────────────────────────────────────────────────
+        _port_cfg = server_port if server_port is not None else _DEFAULT_SERVER_PORT
+        if _port_cfg == 0:
+            import socket as _sock
+            with _sock.socket() as s:
+                s.bind(("", 0))
+                _port_cfg = s.getsockname()[1]
+            print(f"[Refiner] 空きポートを自動割り当て: {_port_cfg}")
+        self._server_port = _port_cfg
+
+        if model not in _MODEL_FILES_REFINER:
+            model_path = None
+        else:
+            model_path = _dir / _MODEL_FILES_REFINER[model]
+
         if model_path is None:
             print(f"[Refiner] 不明なモデルキー: {model!r}")
             print("[Refiner] → ルールベース整形で動作します")
@@ -194,10 +233,10 @@ class LlamaRefiner:
         self._model_path = model_path
 
         # ── サーバーモード優先 ────────────────────────────────────────
-        if LLAMA_SERVER.exists():
+        if self._llama_server.exists():
             self._use_server = True
             self._available  = True
-            print(f"[Refiner] LLM整形: {model_path.name} (サーバーモード, ポート {_SERVER_PORT})")
+            print(f"[Refiner] LLM整形: {model_path.name} (サーバーモード, ポート {self._server_port})")
             print(f"[Refiner] バックグラウンドでサーバーを起動中...")
             threading.Thread(
                 target=self._start_server,
@@ -207,7 +246,7 @@ class LlamaRefiner:
             return
 
         # ── CLI サブプロセスモード（フォールバック）──────────────────
-        if not LLAMA_CLI.exists():
+        if not self._llama_cli.exists():
             print(f"[Refiner] llama-server.exe も llama-cli.exe も見つかりません")
             print("[Refiner] → ルールベース整形で動作します")
             return
@@ -221,10 +260,10 @@ class LlamaRefiner:
     def _start_server(self):
         """llama-server.exe をバックグラウンド起動し、ヘルスチェックで準備完了を待つ。"""
         cmd = [
-            str(LLAMA_SERVER),
+            str(self._llama_server),
             "-m",          str(self._model_path),
             "-ngl",        _N_GPU,
-            "--port",      str(_SERVER_PORT),
+            "--port",      str(self._server_port),
             "--ctx-size",  _N_CTX,
             "--log-disable",
         ]
@@ -240,7 +279,7 @@ class LlamaRefiner:
             self._use_server = False
             return
 
-        health_url = f"http://localhost:{_SERVER_PORT}/health"
+        health_url = f"http://localhost:{self._server_port}/health"
         deadline   = time.time() + _STARTUP_TIMEOUT
 
         while time.time() < deadline:
@@ -322,7 +361,7 @@ class LlamaRefiner:
         }).encode("utf-8")
 
         req = urllib.request.Request(
-            f"http://localhost:{_SERVER_PORT}/completion",
+            f"http://localhost:{self._server_port}/completion",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -345,7 +384,7 @@ class LlamaRefiner:
     def _llm_refine_cli(self, raw_text: str) -> str:
         prompt = _build_chatml(raw_text)
         cmd = [
-            str(LLAMA_CLI),
+            str(self._llama_cli),
             "-m",                str(self._model_path),
             "-p",                prompt,
             "-n",                _N_PRED,

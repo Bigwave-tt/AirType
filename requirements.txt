@@ -21,6 +21,12 @@ pyperclip>=1.8.2       # クリップボード操作
 pystray>=0.19.0        # システムトレイアイコン
 Pillow>=10.0.0         # トレイアイコン画像生成 (PIL)
 
+# ─── ネットワーク対応 (api_server.py / client.py) ────
+fastapi>=0.111.0       # API サーバーフレームワーク (api_server.py)
+uvicorn>=0.29.0        # ASGI サーバー (api_server.py)
+python-multipart>=0.0.9  # multipart/form-data パース (api_server.py)
+# requests は Step 3 で既に追加済み (client.py でも使用)
+
 # ─── 備考 ────────────────────────────────────────────
 # sounddevice は内部で PortAudio C ライブラリを使用します。
 # Linux: sudo apt install libportaudio2

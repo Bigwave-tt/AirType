@@ -319,6 +319,7 @@ class AirTypeClient:
         self._wav_queue.put(_POISON_PILL)
         self._worker.join(timeout=5.0)
         self._ptt_hook.stop()
+        self.recorder.close()
         print("[Client] 終了しました")
 
 

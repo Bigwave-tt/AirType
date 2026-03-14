@@ -52,17 +52,66 @@ Pillow       >=10.0.0   トレイアイコン画像生成
 
 ---
 
+## 動作モード
+
+### シングルPCモード（デフォルト）
+
+GPU を搭載した1台のPCで録音・STT・LLM・ペーストをすべて実行します。
+
+```
+python main.py
+# または
+AirType_launcher.vbs をダブルクリック
+```
+
+### ネットワークモード（2台構成）
+
+GPU 非搭載のクライアントPCから GPU 搭載のホストPCに音声データを送信し、
+STT・LLM処理をホストPC側で行います。
+
+| 役割 | PC | 起動スクリプト | 必要なもの |
+|------|----|---------------|-----------|
+| **ホスト（サーバー）** | t-tak（RX 6600搭載） | `api_server.py` | whisper.cpp / llama.cpp / GPU |
+| **クライアント** | mahan | `client.py` | マイク・Python のみ |
+
+**ホストPC（t-tak）での起動:**
+```
+python api_server.py
+```
+
+**クライアントPC（mahan）での起動:**
+```
+python client.py
+# または
+client_launcher.vbs をダブルクリック
+```
+
+**設定（`airtype_config.json`）:**
+```json
+"network": {
+    "server_url": "http://192.168.68.75:8000/dictate"
+}
+```
+> `server_url` はホストPC（t-tak）のIPアドレスを指定します。
+
+---
+
 ## フォルダ構成
 
 ```
 AirType/
-├── main.py               メインスクリプト・アプリ統合
+├── main.py               メインスクリプト（シングルPCモード）
+├── api_server.py         APIサーバー（ネットワークモード・ホストPC用）
+├── client.py             軽量クライアント（ネットワークモード・クライアントPC用）
 ├── step1_recorder.py     音声録音
 ├── step2_transcriber.py  音声→テキスト変換 (STT)
 ├── step3_refiner.py      テキスト整形 (LLM)
 ├── step4_paster.py       クリップボード + ペースト
 ├── step5_gui.py          GUI (トレイ・設定・履歴)
-├── AirType_launcher.vbs  コンソールなし起動ランチャー
+├── config.py             設定読み込みユーティリティ
+├── airtype_config.json   設定ファイル
+├── AirType_launcher.vbs  シングルPCモード用ランチャー
+├── client_launcher.vbs   クライアントPC用ランチャー
 ├── requirements.txt      Python 依存パッケージ
 └── SPEC.md               本仕様書
 ```

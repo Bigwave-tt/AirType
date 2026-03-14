@@ -113,15 +113,15 @@ def _build_chatml(raw_text: str) -> str:
     )
 
 
-def _is_faithful(raw: str, refined: str, threshold: float = 0.70) -> bool:
+def _is_faithful(raw: str, refined: str, threshold: float = 0.85) -> bool:
     """
     LLM の出力が入力テキストに対して忠実かどうかを判定する。
 
     句読点・空白を除いたテキストで SequenceMatcher の類似度を計算し、
     threshold を下回ったら「過剰編集」と判断して False を返す。
 
-    フィラー削除や句読点追加程度の変更は許容する（ratio ≈ 0.8〜1.0）。
-    文の書き換えや削除は拒否する（ratio < 0.70 が多い）。
+    フィラー削除や句読点追加程度の変更は許容する（ratio ≈ 0.90〜1.0）。
+    単語の置換・意味変更は拒否する（ratio < 0.85 が多い）。
     """
     def _strip(text: str) -> str:
         return re.sub(r"[、。・\s　]", "", text)

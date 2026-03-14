@@ -116,7 +116,7 @@ class TrayIcon:
 # ─────────────────────────────────────
 class SettingsWindow:
     """
-    モデル選択などの設定ダイアログ。
+    モデル選択・Refiner ON/OFF などの設定ダイアログ。
     show() はメインスレッドから呼ぶこと。
     """
 
@@ -134,10 +134,14 @@ class SettingsWindow:
         master: tk.Tk,
         get_model: Callable[[], str],
         on_apply: Callable[[str], None],
+        get_use_refiner: Callable[[], bool] = lambda: True,
+        on_refiner_change: Callable[[bool], None] = lambda v: None,
     ):
         self._master    = master
         self._get_model = get_model
         self._on_apply  = on_apply
+        self._get_use_refiner  = get_use_refiner
+        self._on_refiner_change = on_refiner_change
         self._win = None
 
     def show(self):
@@ -196,8 +200,28 @@ class SettingsWindow:
             fg="#888888",
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
 
+        # ── LLM テキスト整形 (Refiner) ON/OFF ─────────────
+        sep = ttk.Separator(win, orient="horizontal")
+        sep.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2))
+
+        refiner_var = tk.BooleanVar(value=self._get_use_refiner())
+        refiner_chk = tk.Checkbutton(
+            win,
+            text="LLM テキスト整形を使用する（句読点追加・フィラー除去）",
+            variable=refiner_var,
+            font=("Yu Gothic UI", 10),
+        )
+        refiner_chk.grid(row=4, column=0, columnspan=2, sticky="w", **PAD)
+
+        tk.Label(
+            win,
+            text="OFF にすると Whisper の認識結果をそのまま出力します（より正確な場合があります）",
+            font=("Yu Gothic UI", 9),
+            fg="#888888",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+
         btn_frame = tk.Frame(win)
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=(4, 12))
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=(4, 12))
 
         def apply():
             selected_display = model_var.get()
@@ -213,6 +237,7 @@ class SettingsWindow:
                     parent=win,
                 )
                 return
+            self._on_refiner_change(refiner_var.get())
             self._on_apply(selected_key)
             win.destroy()
 

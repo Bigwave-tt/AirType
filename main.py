@@ -295,6 +295,9 @@ class AirType:
         )
         self.paster = Paster()
 
+        # Refiner 使用フラグ (設定画面から切り替え可能)
+        self.use_refiner = True
+
         # 状態管理
         self.state         = State.IDLE
         self._state_lock   = threading.Lock()
@@ -324,11 +327,13 @@ class AirType:
         # 認識履歴 (どのスレッドからでも add() 可能)
         self._history = HistoryWindow(root)
 
-        # 設定ウィンドウ (モデル変更コールバック付き)
+        # 設定ウィンドウ (モデル変更 + Refiner ON/OFF コールバック付き)
         self._settings = SettingsWindow(
             master=root,
             get_model=lambda: self.transcriber.model_key,
             on_apply=self._change_model,
+            get_use_refiner=lambda: self.use_refiner,
+            on_refiner_change=self._set_use_refiner,
         )
 
         # システムトレイアイコン
@@ -441,13 +446,16 @@ class AirType:
                 print("[AirType] 音声が認識されませんでした")
                 return
 
-            # 2. テキスト整形
-            refined_text = self.refiner.refine(raw_text)
-            if not refined_text.strip():
-                print("[AirType] 整形後が空のため生テキストを使用します")
-                refined_text = raw_text
-            elif self._is_ascii_dominant(refined_text) and not self._is_ascii_dominant(raw_text):
-                print("[AirType] LLM が英語に変換しました。生テキストを使用します")
+            # 2. テキスト整形 (use_refiner が False なら Whisper 結果をそのまま使用)
+            if self.use_refiner:
+                refined_text = self.refiner.refine(raw_text)
+                if not refined_text.strip():
+                    print("[AirType] 整形後が空のため生テキストを使用します")
+                    refined_text = raw_text
+                elif self._is_ascii_dominant(refined_text) and not self._is_ascii_dominant(raw_text):
+                    print("[AirType] LLM が英語に変換しました。生テキストを使用します")
+                    refined_text = raw_text
+            else:
                 refined_text = raw_text
 
             # 3. アクティブウィンドウへペースト
@@ -479,6 +487,12 @@ class AirType:
             self._root.quit()
         except Exception:
             pass
+
+    def _set_use_refiner(self, enabled: bool):
+        """Refiner の使用有無を切り替える（設定ウィンドウから呼ばれる）"""
+        self.use_refiner = enabled
+        state_str = "ON" if enabled else "OFF"
+        print(f"[AirType] LLM テキスト整形: {state_str}")
 
     def _change_model(self, model_key: str):
         """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）"""

@@ -18,7 +18,6 @@ AirType - Step 2: whisper.cpp (Vulkan GPU) による音声→テキスト変換
       whisper-cli.exe              ← フォールバック (CLIモード用)
       ggml-kotoba-whisper-v2.0-q5_0.bin   ← 推奨 (速度・精度バランス・約538MB)
       ggml-kotoba-whisper-v2.0.bin         ← 量子化なし完全版 (最高精度・約1.52GB)
-      ggml-large-v3.bin                    ← 汎用 (--model large-v3)
       ggml-vulkan.dll
       ...
 
@@ -55,9 +54,6 @@ _DEFAULT_WHISPER_DIR = _HERE.parent / "whisper.cpp-windows-vulkan"
 _MODEL_FILES = {
     "kotoba-q5":   "ggml-kotoba-whisper-v2.0-q5_0.bin",   # 推奨: 速度・精度バランス (~538MB)
     "kotoba-full": "ggml-kotoba-whisper-v2.0.bin",          # 最高精度: 量子化なし (~1.52GB)
-    "large-v3":    "ggml-large-v3.bin",                     # 汎用: 量子化なし (最も遅い)
-    "accurate":    "ggml-large-v3-q5_0.bin",                # 汎用: 量子化あり (遅い)
-    "turbo":       "ggml-large-v3-turbo-q5_0.bin",          # 汎用: 高速 (やや低精度)
 }
 
 # 後方互換性のためモジュールレベルでも公開（デフォルトパスを使用）
@@ -73,9 +69,6 @@ DEFAULT_MODEL = "kotoba-q5"
 MODEL_TIMEOUTS = {
     "kotoba-q5":   30,
     "kotoba-full": 45,
-    "large-v3":    120,
-    "accurate":    120,
-    "turbo":       60,
 }
 
 DEFAULT_LANGUAGE = "ja"

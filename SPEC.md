@@ -31,7 +31,7 @@ AirType の親フォルダ/
 │   ├── whisper-server.exe    ← STT サーバーモード（推奨）
 │   ├── whisper-cli.exe       ← STT CLI モード（フォールバック）
 │   ├── ggml-kotoba-whisper-v2.0-q5_0.bin   ← デフォルトモデル (~538 MB)
-│   ├── ggml-kotoba-whisper-v2.0.bin         ← 高精度モデル (~1.52 GB)
+│   ├── ggml-kotoba-whisper-v2.0.bin         ← 高精度モデル (~1.52 GB)（任意）
 │   └── ggml-vulkan.dll
 └── llama.cpp-windows-vulkan/
     ├── llama-server.exe      ← LLM サーバーモード（推奨）
@@ -238,9 +238,6 @@ IDLE ←── WAV を Queue に投入
 |------|----------|--------|------|
 | `kotoba-q5`（デフォルト） | ggml-kotoba-whisper-v2.0-q5_0.bin | ~538 MB | 日本語特化・速度精度バランス |
 | `kotoba-full` | ggml-kotoba-whisper-v2.0.bin | ~1.52 GB | 最高精度 |
-| `large-v3` | ggml-large-v3.bin | ~3 GB | 汎用・低速 |
-| `accurate` | ggml-large-v3-q5_0.bin | ~1.1 GB | 汎用・量子化 |
-| `turbo` | ggml-large-v3-turbo-q5_0.bin | ~850 MB | 汎用・高速 |
 
 **初期プロンプト:** `"日本語の音声入力です。"`（同音異義語誤認識の軽減）
 

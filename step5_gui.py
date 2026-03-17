@@ -124,9 +124,6 @@ class SettingsWindow:
     _MODELS = {
         "kotoba-q5":   "kotoba-q5   (推奨・538 MB・日本語特化)",
         "kotoba-full": "kotoba-full (最高精度・1.52 GB・日本語特化)",
-        "turbo":       "turbo       (汎用・高速)",
-        "accurate":    "accurate    (汎用・高精度)",
-        "large-v3":    "large-v3    (汎用・量子化なし・最大)",
     }
 
     def __init__(

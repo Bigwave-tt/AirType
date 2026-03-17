@@ -1,6 +1,6 @@
 # AirType 仕様書
 
-> 最終更新: 2026-03-12
+> 最終更新: 2026-03-17
 > ブランチ: `claude/add-completed-code-A2gKy`
 
 ---
@@ -41,11 +41,25 @@ AirType の親フォルダ/
 
 ### Python 依存パッケージ
 
+**シングルPC・ホストPC 共通:**
 ```
 pynput       >=1.7.6    グローバルホットキー・キーボード制御
 sounddevice  >=0.4.6    マイク録音 (PortAudio ラッパー)
 numpy        >=1.24.0   録音バッファ処理
 pyperclip    >=1.8.2    クリップボード操作
+pystray      >=0.19.0   システムトレイアイコン
+Pillow       >=10.0.0   トレイアイコン画像生成
+```
+
+**ホストPC (api_server.py) 追加パッケージ:**
+```
+fastapi      >=0.110.0  REST API フレームワーク
+uvicorn      >=0.29.0   ASGI サーバー
+```
+
+**クライアントPC (client.py) 追加パッケージ:**
+```
+requests     >=2.31.0   HTTP クライアント（サーバーへの WAV 送信）
 pystray      >=0.19.0   システムトレイアイコン
 Pillow       >=10.0.0   トレイアイコン画像生成
 ```
@@ -89,10 +103,21 @@ client_launcher.vbs をダブルクリック
 **設定（`airtype_config.json`）:**
 ```json
 "network": {
-    "server_url": "http://YOUR_SERVER_IP:8000/dictate"
+    "server_url":      "http://YOUR_SERVER_IP:8000/dictate",
+    "host":            "0.0.0.0",
+    "port":            8000,
+    "api_key":         "",
+    "request_timeout": 60
 }
 ```
-> `server_url` はホストPC（t-tak）のIPアドレスを指定します。
+
+| キー | 用途 |
+|------|------|
+| `server_url` | クライアントPC が接続するサーバーの URL |
+| `host` | api_server.py がリッスンするアドレス (`0.0.0.0`=全IF, `127.0.0.1`=ローカルのみ) |
+| `port` | api_server.py のポート番号 |
+| `api_key` | APIキー認証（空文字=認証なし。client.py と api_server.py で同じ値を設定） |
+| `request_timeout` | client.py のリクエストタイムアウト（秒） |
 
 ---
 
@@ -103,6 +128,7 @@ AirType/
 ├── main.py               メインスクリプト（シングルPCモード）
 ├── api_server.py         APIサーバー（ネットワークモード・ホストPC用）
 ├── client.py             軽量クライアント（ネットワークモード・クライアントPC用）
+├── client_gui.py         クライアント用 GUI コンポーネント（トレイ・履歴）
 ├── step1_recorder.py     音声録音
 ├── step2_transcriber.py  音声→テキスト変換 (STT)
 ├── step3_refiner.py      テキスト整形 (LLM)
@@ -134,9 +160,13 @@ AirType/
   音声→テキスト (whisper.cpp Vulkan)
     │ 生テキスト (句読点なし、フィラーあり)
     ▼
-[Step 3] LlamaRefiner
+[Step 3] LlamaRefiner  ← use_refiner=False の場合はスキップ
   フィラー除去 + 句読点追加 (Qwen3.5 LLM)
     │ 整形テキスト
+    ▼
+[ASCII 支配チェック]
+  LLM が日本語を英語に変換した場合は生テキストを使用
+    │
     ▼
 [Step 4] Paster
   クリップボードコピー + Ctrl+V 送信
@@ -250,8 +280,12 @@ IDLE ←── WAV を Queue に投入
 
 **忠実度チェック (`_is_faithful`):**
 - 句読点・空白除去後の `SequenceMatcher.ratio()` で類似度を計算
-- ratio < 0.70 → 「過剰編集」と判定してルールベースにフォールバック
-- 目的: 文の書き換え・削除を検出（フィラー削除は ratio ≈ 0.8〜1.0 なので通過）
+- ratio < 0.85 → 「過剰編集」と判定してルールベースにフォールバック
+- 目的: 文の書き換え・削除を検出（フィラー削除は ratio ≈ 0.90〜1.0 なので通過）
+
+**ASCII 支配チェック (`_is_ascii_dominant`):**
+- 英字の 80% 超が ASCII の場合に「英語テキスト」と判定
+- LLM が日本語を英語に変換した場合は生テキストを使用（main.py・api_server.py 共通）
 
 **フォールバック階層:**
 ```
@@ -278,13 +312,31 @@ RuleBasedRefiner (正規表現フィラー除去のみ)
 ### Step 5: GUI (`step5_gui.py`)
 
 - **TrayIcon**: pystray によるシステムトレイアイコン
-  - 録音中は赤アイコン、アイドル時はグレーアイコン
+  - 録音中は赤いマイクアイコン、アイドル時は青いマイクアイコン
   - 右クリックメニュー: 設定・履歴・終了
 - **SettingsWindow**: tkinter によるモデル選択ダイアログ
   - Whisper モデルの変更（変更時は旧サーバーを終了して新サーバーを起動）
+  - LLM テキスト整形 (Refiner) の ON/OFF 切り替えチェックボックス
 - **HistoryWindow**: 認識テキスト履歴（最大 200 件）
   - コピー・全消去機能付き
 - **OSD**: 枠なし・半透明・常に最前面・クリック透過の録音中インジケーター
+
+### クライアント GUI (`client_gui.py`)
+
+ネットワークモードのクライアントPC 専用 GUI コンポーネント。
+
+- **ClientTrayIcon**: pystray によるシステムトレイアイコン（4状態）
+
+| 状態キー | アイコン色 | tooltip |
+|---------|-----------|---------|
+| `idle` | 青 | AirType クライアント - 無変換で録音 |
+| `recording` | 赤 | 🎤 録音中... |
+| `processing` | 橙（砂時計） | ⏳ 処理中... |
+| `error` | グレー | ⚠ エラーが発生しました |
+
+- **ClientHistoryWindow**: サーバーから受信したテキストの履歴（最大 200 件）
+  - コピー・全消去機能付き
+  - 右クリックメニュー: 認識履歴・終了（設定メニューなし）
 
 ---
 
@@ -309,7 +361,7 @@ RuleBasedRefiner (正規表現フィラー除去のみ)
 > 両サーバー合計が 8 GB を超えるため llama-server の一部が共有メモリ（PCIe 経由、低速）に溢れる。
 > GPU Compute は正常に動作している（Compute 0 グラフで確認済み）。
 
-**起動順序（`main.py`）:**
+**起動順序（`main.py` / `api_server.py`）:**
 ```
 LlamaRefiner 起動
     ↓ _server_ready イベントがゲートとして機能
@@ -352,7 +404,7 @@ AirType_launcher.vbs をダブルクリック
 | 項目 | 内容 |
 |------|------|
 | Whisper 認識精度 | 小声・環境音で誤認識が増加。文境界なしで連続発話すると LLM が誤解釈する場合あり |
-| LLM 微細変更 | ratio ≥ 0.70 の微細な単語置換（`は→も` 等）は忠実度チェックをすり抜けることがある |
+| LLM 微細変更 | ratio ≥ 0.85 の微細な単語置換（`は→も` 等）は忠実度チェックをすり抜けることがある |
 | VRAM 共有 | 両サーバー同時動作で llama-server の一部が PCIe 経由の共有メモリに溢れる |
 | モデル変更 | 設定ウィンドウからの Whisper モデル変更のみ対応。Qwen モデルの変更には再起動が必要 |
 | Windows 専用 | `WH_KEYBOARD_LL`・IME 制御・`CREATE_NO_WINDOW` 等の Windows API を多用 |

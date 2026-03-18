@@ -526,6 +526,19 @@ class AirType:
 # エントリポイント
 # ─────────────────────────────────────
 def main():
+    # ── 二重起動防止 (Windows 名前付きミューテックス) ────────────────
+    _mutex = None
+    if sys.platform == "win32":
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "AirType-Main")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "AirType はすでに起動しています。\nタスクトレイのアイコンを確認してください。",
+                "AirType - 二重起動エラー",
+                0x10,  # MB_ICONERROR
+            )
+            sys.exit(1)
+
     # tkinter はメインスレッドで起動する
     root = tk.Tk()
     root.withdraw()  # メイン Tk ウィンドウ自体は非表示 (OSD は Toplevel で独立表示)

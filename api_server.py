@@ -26,6 +26,8 @@ STT（Whisper）+ テキスト整形（LLM）を実行して結果を返す。
 """
 
 import atexit
+import ctypes
+import sys
 import tempfile
 from pathlib import Path
 
@@ -231,6 +233,13 @@ def _init_pipeline():
 
 
 def main():
+    # ── 二重起動防止 (Windows 名前付きミューテックス) ────────────────
+    if sys.platform == "win32":
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "AirType-ApiServer")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            print("[API] ERROR: AirType API Server はすでに起動しています。終了します。")
+            sys.exit(1)
+
     _init_pipeline()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 

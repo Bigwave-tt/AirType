@@ -21,8 +21,9 @@ CONFIG_PATH = _HERE / "airtype_config.json"
 _DEFAULTS: dict = {
     "network": {
         "server_url":      "http://YOUR_SERVER_IP:8000/dictate",  # client.py 用
-        "host":            "0.0.0.0",   # api_server.py のリッスンアドレス
-        "port":            8000,         # api_server.py のポート
+        "host":            "0.0.0.0",   # main.py / api_server.py のリッスンアドレス
+        "port":            8000,         # main.py / api_server.py のポート
+        "serve":           False,        # True = main.py で API サーバーも起動する
         "api_key":         "",           # 空文字 = 認証なし
         "request_timeout": 60,           # client.py のリクエストタイムアウト (秒)
     },

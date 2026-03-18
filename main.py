@@ -6,21 +6,18 @@ AirType - メインスクリプト (全モジュール統合)
   [無変換 離放] → OSD非表示 + 録音停止 → WAV → Queue → Worker → STT → 整形 → ペースト
 
 スレッドモデル:
-  メインスレッド  : tkinter OSD イベントループ (tkinter は必ずメインスレッド)
-  PttHook スレッド: WH_KEYBOARD_LL フック + Windows メッセージポンプ
-  Worker スレッド : Queue から WAV を取り出して STT→整形→ペースト (不老不死)
-  録音            : sounddevice 非同期ストリーム (追加スレッド不要)
+  メインスレッド    : tkinter OSD イベントループ (tkinter は必ずメインスレッド)
+  PttHook スレッド  : WH_KEYBOARD_LL フック + Windows メッセージポンプ
+  Worker スレッド   : Queue から WAV を取り出して STT→整形→ペースト (不老不死)
+  ApiServer スレッド: (serve=true 時) uvicorn + FastAPI でクライアントPCからの受付
+  録音              : sounddevice 非同期ストリーム (追加スレッド不要)
 
-Phase 1 - キー横取り:
-  WH_KEYBOARD_LL フックで VK_NONCONVERT (無変換) を IME に渡す前に握りつぶす。
-  それ以外のキーは CallNextHookEx で通常通りに通過させる。管理者権限不要。
-
-Phase 2 - 録音中 OSD:
-  枠なし・常に最前面・半透明・クリック透過の Toplevel ウィンドウ。
-  画面下部中央に「🎤 録音中...」を表示。スレッドセーフな Queue 経由で制御。
-
-Phase 3 - ランチャー:
-  AirType_launcher.vbs を使ってコンソールなしでワンクリック起動可能。
+動作モード:
+  ローカルのみ (デフォルト):
+    ホストPC上で無変換キーによる音声入力のみ。
+  ローカル + API サーバー (airtype_config.json の network.serve = true):
+    ホストPCでの音声入力に加え、クライアントPCからの /dictate リクエストも受付。
+    同じ Whisper / LLM インスタンスを共有するため VRAM の二重確保が起きない。
 """
 
 import ctypes
@@ -344,12 +341,20 @@ class AirType:
             on_quit=self.shutdown,
         )
 
+        # ── API サーバー (クライアントPCからのリモート受付) ──────────
+        _net_cfg = _cfg["network"]
+        self._api_serve = _net_cfg.get("serve", False)
+        if self._api_serve:
+            self._start_api_server(_net_cfg)
+
         # UI ポーリング開始 (50ms ごと)
         self._root.after(50, self._poll_ui_queue)
 
         print("\n" + "=" * 50)
         print("  AirType 起動完了")
         print(f"  PTT キー: 無変換 (VK=0x{PTT_KEY_VK:02X}) を押し続けて録音")
+        if self._api_serve:
+            print(f"  API サーバー: http://{_net_cfg['host']}:{_net_cfg['port']}/dictate")
         print("  終了: トレイアイコン右クリック → 終了")
         print("=" * 50 + "\n")
 
@@ -507,6 +512,81 @@ class AirType:
                 print(f"[AirType] モデル変更失敗: {e}")
         threading.Thread(target=_do_change, daemon=True, name="ModelChange").start()
 
+    # ── API サーバー (serve=true 時のみ) ──────────────────────────────
+    def _start_api_server(self, net_cfg: dict):
+        """FastAPI + uvicorn をデーモンスレッドで起動し /dictate を公開する。
+
+        同じ transcriber / refiner インスタンスを共有するため、
+        api_server.py を別プロセスで起動する必要がなくなり VRAM の二重確保を回避できる。
+        """
+        import tempfile as _tempfile
+
+        import uvicorn
+        from fastapi import Depends, FastAPI, File, HTTPException, Security, UploadFile
+        from fastapi.security.api_key import APIKeyHeader
+
+        host    = net_cfg["host"]
+        port    = int(net_cfg["port"])
+        api_key = net_cfg["api_key"]
+
+        api = FastAPI(title="AirType", version="2.0.0")
+        _key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+        async def _verify(key: str = Security(_key_header)):
+            if api_key and key != api_key:
+                raise HTTPException(status_code=403, detail="無効なAPIキーです")
+
+        @api.get("/health")
+        def health():
+            return {"status": "ok"}
+
+        @api.post("/dictate", dependencies=[Depends(_verify)])
+        async def dictate(file: UploadFile = File(...)):
+            tmp_path: Path | None = None
+            try:
+                audio_bytes = await file.read()
+                if not audio_bytes:
+                    raise HTTPException(status_code=400, detail="音声データが空です")
+
+                with _tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(audio_bytes)
+                    tmp_path = Path(tmp.name)
+
+                print(f"[API] /dictate 受信: {tmp_path.name}  ({len(audio_bytes) / 1024:.1f} KB)")
+
+                raw_text = self.transcriber.transcribe(tmp_path)
+                if not raw_text.strip():
+                    print("[API] 音声が認識されませんでした")
+                    return {"text": "", "raw": ""}
+
+                if self.use_refiner:
+                    refined_text = self.refiner.refine(raw_text)
+                    if not refined_text.strip():
+                        refined_text = raw_text
+                    elif self._is_ascii_dominant(refined_text) and not self._is_ascii_dominant(raw_text):
+                        print("[API] LLM が英語に変換しました。生テキストを使用します")
+                        refined_text = raw_text
+                else:
+                    refined_text = raw_text
+
+                print(f"[API] 完了: {refined_text!r}")
+                return {"text": refined_text, "raw": raw_text}
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[API] パイプラインエラー: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+            finally:
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink()
+
+        def _run():
+            uvicorn.run(api, host=host, port=port, log_level="info")
+
+        threading.Thread(target=_run, daemon=True, name="ApiServer").start()
+        print(f"[AirType] API サーバー有効: http://{host}:{port}/dictate")
+
     # ── ユーティリティ ─────────────────────────────────────────────────
     @staticmethod
     def _is_ascii_dominant(text: str) -> bool:
@@ -526,6 +606,19 @@ class AirType:
 # エントリポイント
 # ─────────────────────────────────────
 def main():
+    # ── 二重起動防止 (Windows 名前付きミューテックス) ────────────────
+    _mutex = None
+    if sys.platform == "win32":
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "AirType-Main")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "AirType はすでに起動しています。\nタスクトレイのアイコンを確認してください。",
+                "AirType - 二重起動エラー",
+                0x10,  # MB_ICONERROR
+            )
+            sys.exit(1)
+
     # tkinter はメインスレッドで起動する
     root = tk.Tk()
     root.withdraw()  # メイン Tk ウィンドウ自体は非表示 (OSD は Toplevel で独立表示)

@@ -91,7 +91,7 @@ _SYSTEM_PROMPT = (
     "【許可】文末や読点が欠けている箇所への句読点（、。）の追加。\n"
     "【禁止】単語の変更・言い換え・削除・追加。\n"
     "【禁止】文の並び替え・要約・結合・分割。\n"
-    "【禁止】文体の変更（だ・である調 ↔ です・ます調 の変換を含む）。\n"
+    "【禁止】文体の変更（『遅れてます』→『遅れています』のような語尾の正規化を含む）。\n"
     "校正後のテキストのみを出力してください。説明や挨拶は不要です。"
 )
 
@@ -141,7 +141,7 @@ def _build_prompt(model_key: str, raw_text: str) -> str:
     return _build_chatml(raw_text)
 
 
-def _is_faithful(raw: str, refined: str, threshold: float = 0.85) -> bool:
+def _is_faithful(raw: str, refined: str, threshold: float = 0.75) -> bool:
     """
     LLM の出力が入力テキストに対して忠実かどうかを判定する。
 

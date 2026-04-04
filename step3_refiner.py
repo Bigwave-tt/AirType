@@ -25,8 +25,8 @@ RuleBasedRefiner: 正規表現によるフィラー除去 [フォールバック
       llama-cli.exe             ← フォールバック (CLIモード用)
       Qwen3.5-2B-Q5_K_M.gguf             ← Qwen 3.5 推奨 (速度重視・約2GB)
       qwen3.5-4b-instruct-q5_k_m.gguf   ← Qwen 3.5 高精度 (約4GB)
-      gemma-4-E2B-it-Q8_0.gguf           ← Gemma 4 推奨 (速度重視・約2GB)
-      gemma-4-E4B-it-Q8_0.gguf           ← Gemma 4 高精度 (約4GB)
+      google_gemma-4-E2B-it-Q8_0.gguf    ← Gemma 4 推奨 (速度重視・約2GB)
+      google_gemma-4-E4B-it-Q8_0.gguf    ← Gemma 4 高精度 (約4GB)
 """
 
 import difflib
@@ -49,8 +49,8 @@ _DEFAULT_LLAMA_DIR = _HERE.parent / "llama.cpp-windows-vulkan"
 _MODEL_FILES_REFINER = {
     "qwen3.5-2b": "Qwen3.5-2B-Q5_K_M.gguf",
     "qwen3.5-4b": "qwen3.5-4b-instruct-q5_k_m.gguf",
-    "gemma4-e2b": "gemma-4-E2B-it-Q8_0.gguf",
-    "gemma4-e4b": "gemma-4-E4B-it-Q8_0.gguf",
+    "gemma4-e2b": "google_gemma-4-E2B-it-Q8_0.gguf",
+    "gemma4-e4b": "google_gemma-4-E4B-it-Q8_0.gguf",
 }
 
 # 後方互換性のためモジュールレベルでも公開（デフォルトパスを使用）

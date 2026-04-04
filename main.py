@@ -74,7 +74,7 @@ from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
 from step4_paster import Paster
-from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow
+from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow, VideoTranscribeWindow
 from updater import LlamaUpdater
 from personal_dict import PersonalDict
 
@@ -377,6 +377,11 @@ class AirType:
         # 個人辞書ウィンドウ
         self._dict_win = DictWindow(root, self.personal_dict)
 
+        # 動画文字起こしウィンドウ
+        self._video_win = VideoTranscribeWindow(
+            root, self.transcriber, personal_dict=self.personal_dict
+        )
+
         # システムトレイアイコン
         self._tray = TrayIcon(
             root=root,
@@ -384,6 +389,7 @@ class AirType:
             on_history=self._history.show,
             on_quit=self.shutdown,
             on_dict=self._dict_win.show,
+            on_video_transcribe=self._video_win.show,
         )
 
         # ── API サーバー (クライアントPCからのリモート受付) ──────────

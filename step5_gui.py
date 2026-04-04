@@ -69,6 +69,7 @@ class TrayIcon:
         on_history: Callable,
         on_quit: Callable,
         on_dict: Callable = None,
+        on_video_transcribe: Callable = None,
     ):
         self._root = root
         self._icon = None
@@ -86,6 +87,10 @@ class TrayIcon:
         if on_dict:
             menu_items.append(
                 pystray.MenuItem("個人辞書", lambda icon, item: root.after(0, on_dict))
+            )
+        if on_video_transcribe:
+            menu_items.append(
+                pystray.MenuItem("動画文字起こし", lambda icon, item: root.after(0, on_video_transcribe))
             )
         menu_items += [
             pystray.Menu.SEPARATOR,
@@ -564,3 +569,211 @@ class DictWindow:
         tk.Button(win, text="閉じる", width=10, command=win.destroy).pack(pady=(0, 8))
 
         win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+
+# ─────────────────────────────────────
+# 動画文字起こしウィンドウ
+# ─────────────────────────────────────
+class VideoTranscribeWindow:
+    """
+    動画ファイルを選択して文字起こしするウィンドウ。
+    ffmpeg で音声抽出 → 既存の WhisperTranscriber で文字起こし。
+    show() はメインスレッドから呼ぶこと。
+    """
+
+    # 動画推論タイムアウト (秒) - 通常の 30 秒より大幅に長く設定
+    _VIDEO_INFER_TIMEOUT = 600
+
+    def __init__(self, master: tk.Tk, transcriber, personal_dict=None):
+        self._master        = master
+        self._transcriber   = transcriber
+        self._personal_dict = personal_dict
+        self._win           = None
+
+    def show(self):
+        """ファイル選択ダイアログを開き、選択されたら文字起こしを開始する。"""
+        if self._win and self._win.winfo_exists():
+            self._win.lift()
+            self._win.focus()
+            return
+        self._open_file_and_start()
+
+    def _open_file_and_start(self):
+        from tkinter import filedialog, messagebox
+        from video_transcriber import find_ffmpeg
+
+        ffmpeg = find_ffmpeg()
+        if ffmpeg is None:
+            messagebox.showerror(
+                "ffmpeg が見つかりません",
+                "ffmpeg がインストールされていないか、PATH に含まれていません。\n\n"
+                "インストール後に再試行してください。\n"
+                "または アプリフォルダ/ffmpeg/ffmpeg.exe に配置しても使用できます。",
+            )
+            return
+
+        video_path_str = filedialog.askopenfilename(
+            title="動画ファイルを選択",
+            filetypes=[
+                ("動画ファイル", "*.mp4 *.mov *.avi *.mkv *.wmv *.flv *.webm *.m4v *.ts"),
+                ("すべてのファイル", "*.*"),
+            ],
+        )
+        if not video_path_str:
+            return  # キャンセル
+
+        self._build_progress(video_path_str, ffmpeg)
+
+    def _build_progress(self, video_path_str: str, ffmpeg: str):
+        import tempfile
+        import threading
+        from pathlib import Path
+        from video_transcriber import extract_audio
+
+        video_path = Path(video_path_str)
+
+        win = tk.Toplevel(self._master)
+        win.title(f"文字起こし中 — {video_path.name}")
+        win.resizable(False, False)
+        win.grab_set()
+        self._win = win
+
+        tk.Label(
+            win,
+            text=f"ファイル: {video_path.name}",
+            font=("Yu Gothic UI", 10),
+            wraplength=420,
+        ).pack(padx=24, pady=(16, 4))
+
+        status_var = tk.StringVar(value="音声を抽出中...")
+        tk.Label(
+            win, textvariable=status_var,
+            font=("Yu Gothic UI", 10), fg="#555555",
+        ).pack(padx=24, pady=(0, 4))
+
+        tk.Label(
+            win,
+            text="長い動画は数分かかる場合があります",
+            font=("Yu Gothic UI", 9), fg="#888888",
+        ).pack(padx=24, pady=(0, 16))
+
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w,  h  = win.winfo_reqwidth(),    win.winfo_reqheight()
+        win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+        def _work():
+            tmp_wav = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    tmp_wav = Path(f.name)
+
+                win.after(0, lambda: status_var.set("音声を抽出中..."))
+                extract_audio(video_path, tmp_wav, ffmpeg_exe=ffmpeg)
+
+                win.after(0, lambda: status_var.set("文字起こし中... (しばらくお待ちください)"))
+                text = self._transcriber.transcribe(
+                    tmp_wav, infer_timeout=self._VIDEO_INFER_TIMEOUT
+                )
+
+                if self._personal_dict:
+                    text = self._personal_dict.apply(text)
+
+                win.after(0, lambda: self._show_result(win, video_path, text))
+
+            except Exception as e:
+                err = str(e)
+                win.after(0, lambda: self._show_error(win, err))
+            finally:
+                if tmp_wav and tmp_wav.exists():
+                    try:
+                        tmp_wav.unlink()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_work, daemon=True, name="VideoTranscribe").start()
+
+    def _show_result(self, progress_win: tk.Toplevel, video_path, text: str):
+        progress_win.grab_release()
+        progress_win.destroy()
+        self._win = None
+
+        win = tk.Toplevel(self._master)
+        win.title(f"文字起こし結果 — {video_path.name}")
+        win.geometry("620x460")
+        self._win = win
+
+        tk.Label(
+            win,
+            text=f"ファイル: {video_path.name}",
+            font=("Yu Gothic UI", 10), fg="#555555",
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+
+        text_frame = tk.Frame(win)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        textbox = tk.Text(
+            text_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Yu Gothic UI", 11),
+            wrap=tk.WORD,
+        )
+        textbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=textbox.yview)
+
+        textbox.insert("1.0", text if text.strip() else "（テキストを検出できませんでした）")
+
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        def copy_all():
+            result_text = textbox.get("1.0", tk.END).rstrip()
+            win.clipboard_clear()
+            win.clipboard_append(result_text)
+
+        def save_as():
+            from tkinter import filedialog
+            from pathlib import Path as _Path
+            save_path_str = filedialog.asksaveasfilename(
+                title="テキストファイルとして保存",
+                initialfile=video_path.stem + ".txt",
+                defaultextension=".txt",
+                filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+            )
+            if save_path_str:
+                _Path(save_path_str).write_text(
+                    textbox.get("1.0", tk.END).rstrip(), encoding="utf-8"
+                )
+
+        tk.Button(btn_frame, text="クリップボードにコピー", width=20, command=copy_all).pack(
+            side=tk.LEFT, padx=4
+        )
+        tk.Button(btn_frame, text="テキストファイルで保存...", width=20, command=save_as).pack(
+            side=tk.LEFT, padx=4
+        )
+        tk.Button(btn_frame, text="閉じる", width=10, command=win.destroy).pack(
+            side=tk.RIGHT, padx=4
+        )
+
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w,  h  = win.winfo_reqwidth(),    win.winfo_reqheight()
+        win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    def _show_error(self, progress_win: tk.Toplevel, error_msg: str):
+        from tkinter import messagebox
+        try:
+            progress_win.grab_release()
+            progress_win.destroy()
+        except Exception:
+            pass
+        self._win = None
+        messagebox.showerror(
+            "文字起こしエラー",
+            f"エラーが発生しました:\n\n{error_msg[:800]}",
+        )

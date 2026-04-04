@@ -264,7 +264,7 @@ class WhisperTranscriber:
         self._use_server  = False
 
     # ── 公開 API ─────────────────────────────────────────────────────
-    def transcribe(self, wav_path: Path) -> str:
+    def transcribe(self, wav_path: Path, infer_timeout: int | None = None) -> str:
         """
         WAV ファイルを文字起こしして結合テキストを返す。
 
@@ -272,6 +272,9 @@ class WhisperTranscriber:
         ----------
         wav_path : Path
             文字起こし対象の WAV ファイルパス
+        infer_timeout : int | None
+            推論タイムアウト秒数。None の場合はデフォルト値を使用。
+            長尺動画など時間がかかる場合は大きな値 (例: 600) を指定する。
 
         Returns
         -------
@@ -285,8 +288,8 @@ class WhisperTranscriber:
         self._check_audio_level(wav_path)
 
         if self._use_server:
-            return self._transcribe_server(wav_path)
-        return self._transcribe_cli(wav_path)
+            return self._transcribe_server(wav_path, infer_timeout=infer_timeout)
+        return self._transcribe_cli(wav_path, infer_timeout=infer_timeout)
 
     def shutdown(self):
         """サーバープロセスを終了する（アプリ終了時に呼ぶ）。"""
@@ -301,20 +304,21 @@ class WhisperTranscriber:
         self._server_proc = None
 
     # ── 内部メソッド: サーバーモード ─────────────────────────────────
-    def _transcribe_server(self, wav_path: Path) -> str:
+    def _transcribe_server(self, wav_path: Path, infer_timeout: int | None = None) -> str:
         """whisper-server HTTP API 経由で文字起こしを行う。"""
         # サーバーが準備完了するまで待機
         if not self._server_ready.wait(timeout=_STARTUP_TIMEOUT):
             print("[Transcriber] サーバー準備待機タイムアウト。CLIモードにフォールバック")
-            return self._transcribe_cli(wav_path)
+            return self._transcribe_cli(wav_path, infer_timeout=infer_timeout)
 
         print(f"[Transcriber] 文字起こし開始 (サーバー): {wav_path.name}")
+        timeout = infer_timeout if infer_timeout is not None else _INFER_TIMEOUT
         try:
-            response = self._send_multipart(wav_path)
+            response = self._send_multipart(wav_path, timeout=timeout)
             full_text = self._parse_server_response(response)
         except Exception as e:
             print(f"[Transcriber] サーバーエラー ({type(e).__name__}): {e}。CLIにフォールバック")
-            return self._transcribe_cli(wav_path)
+            return self._transcribe_cli(wav_path, infer_timeout=infer_timeout)
 
         if not full_text:
             print("[Transcriber] WARNING: テキストが取得できませんでした")
@@ -322,7 +326,7 @@ class WhisperTranscriber:
         print(f"[Transcriber] 文字起こし結果:\n  → {full_text!r}")
         return full_text
 
-    def _send_multipart(self, wav_path: Path) -> dict:
+    def _send_multipart(self, wav_path: Path, timeout: int = _INFER_TIMEOUT) -> dict:
         """WAV ファイルをマルチパート POST で whisper-server に送信し JSON を返す。"""
         boundary = "----AirTypeWhisperBoundary"
         audio_bytes = wav_path.read_bytes()
@@ -357,7 +361,7 @@ class WhisperTranscriber:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=_INFER_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
 
     @staticmethod
@@ -381,7 +385,7 @@ class WhisperTranscriber:
         return response.get("text", "").strip()
 
     # ── 内部メソッド: CLI サブプロセスモード ─────────────────────────
-    def _transcribe_cli(self, wav_path: Path) -> str:
+    def _transcribe_cli(self, wav_path: Path, infer_timeout: int | None = None) -> str:
         """whisper-cli.exe サブプロセス経由で文字起こしを行う。"""
         if not self._whisper_cli.exists():
             raise FileNotFoundError(
@@ -398,6 +402,7 @@ class WhisperTranscriber:
             # NOTE: Vulkan GPU は whisper.cpp のビルド時に組み込み済みのため
             # -ngl (GPU レイヤー数) の指定は不要。指定するとこのビルドでは無音終了する。
         ]
+        timeout = infer_timeout if infer_timeout is not None else self.timeout
 
         result = subprocess.run(
             cmd,
@@ -405,7 +410,7 @@ class WhisperTranscriber:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=self.timeout,
+            timeout=timeout,
             creationflags=subprocess.CREATE_NO_WINDOW,  # コマンドプロンプトが点滅しないよう非表示
         )
 

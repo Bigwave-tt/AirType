@@ -376,6 +376,19 @@ class LlamaRefiner:
             print("[Refiner] llama-server 終了しました")
         self._server_proc = None
 
+    def restart_server(self):
+        """llama-server を停止してから再起動する（アップデート後に呼ぶ）。"""
+        if not self._use_server:
+            return
+        self.shutdown()
+        self._server_ready.clear()
+        print("[Refiner] llama-server を再起動中...")
+        threading.Thread(
+            target=self._start_server,
+            daemon=True,
+            name="LlamaServer",
+        ).start()
+
     # ── 内部メソッド: サーバーモード ─────────────────────────────────
     def _llm_refine_server(self, raw_text: str) -> str:
         # サーバーが準備完了するまで待機（Workerスレッドでブロック、UIは影響なし）

@@ -75,6 +75,7 @@ from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
 from step4_paster import Paster
 from step5_gui import TrayIcon, SettingsWindow, HistoryWindow
+from updater import LlamaUpdater
 
 
 # ─────────────────────────────────────
@@ -395,6 +396,75 @@ class AirType:
             print(f"  API サーバー: http://{_net_cfg['host']}:{_net_cfg['port']}/dictate")
         print("  終了: トレイアイコン右クリック → 終了")
         print("=" * 50 + "\n")
+
+        # 起動後にバックグラウンドで llama.cpp の更新チェック（起動をブロックしない）
+        self._llama_dir_for_update = _llama_dir
+        threading.Thread(
+            target=self._check_for_update,
+            daemon=True,
+            name="LlamaUpdateCheck",
+        ).start()
+
+    # ── llama.cpp 更新チェック ──────────────────────────────────────────
+    def _check_for_update(self):
+        """バックグラウンドで llama.cpp の更新を確認し、あればメインスレッドに通知する。"""
+        updater = LlamaUpdater(self._llama_dir_for_update)
+        info = updater.check_update()
+        if info is None:
+            return
+        # tkinter 操作はメインスレッドで行う
+        self._root.after(0, lambda: self._prompt_update(updater, info))
+
+    def _prompt_update(self, updater: "LlamaUpdater", info: dict):
+        """更新確認ダイアログを表示し、承認されたらダウンロード・差し替えを行う。"""
+        from tkinter import messagebox
+        msg = (
+            f"llama.cpp の新しいバージョンがあります。\n\n"
+            f"現在: b{info['local_build']}\n"
+            f"最新: {info['tag']}\n\n"
+            f"ダウンロードしてアップデートしますか？\n"
+            f"（アップデート中は音声認識が一時停止します）"
+        )
+        if not messagebox.askyesno("AirType アップデート", msg):
+            return
+        threading.Thread(
+            target=self._do_update,
+            args=(updater, info),
+            daemon=True,
+            name="LlamaUpdate",
+        ).start()
+
+    def _do_update(self, updater: "LlamaUpdater", info: dict):
+        """llama-server を停止 → ファイル差し替え → 再起動する。"""
+        from tkinter import messagebox
+
+        # llama-server 停止
+        self.refiner.shutdown()
+
+        def _show_progress(downloaded, total):
+            mb = downloaded // 1024 // 1024
+            if total:
+                pct = downloaded * 100 // total
+                print(f"[Updater] ダウンロード中: {mb} MB ({pct}%)", end="\r")
+            else:
+                print(f"[Updater] ダウンロード中: {mb} MB", end="\r")
+
+        success = updater.download_and_apply(info["asset_url"], on_progress=_show_progress)
+        print()  # 改行
+
+        if success:
+            self._root.after(0, lambda: messagebox.showinfo(
+                "AirType",
+                f"llama.cpp を {info['tag']} にアップデートしました。\nllama-server を再起動します。",
+            ))
+            self.refiner.restart_server()
+        else:
+            self._root.after(0, lambda: messagebox.showerror(
+                "AirType",
+                "アップデートに失敗しました。\n手動でアップデートしてください。",
+            ))
+            # 失敗時も llama-server を再起動して通常動作に戻す
+            self.refiner.restart_server()
 
     # ── PTT イベント (PttHook スレッドから呼ばれる) ─────────────────────
     def _handle_ptt_press(self):

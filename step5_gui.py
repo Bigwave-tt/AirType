@@ -4,6 +4,7 @@ AirType - Step 5: GUI コンポーネント
 - TrayIcon      : pystray によるシステムトレイアイコン (右クリックメニュー付き)
 - SettingsWindow: モデル選択などの設定ダイアログ (tkinter Toplevel)
 - HistoryWindow : 認識テキスト履歴の一覧 (tkinter Toplevel)
+- DictWindow    : 個人辞書の管理ウィンドウ (tkinter Toplevel)
 
 スレッド安全性:
   pystray のコールバックは pystray スレッドで実行される。
@@ -67,6 +68,7 @@ class TrayIcon:
         on_settings: Callable,
         on_history: Callable,
         on_quit: Callable,
+        on_dict: Callable = None,
     ):
         self._root = root
         self._icon = None
@@ -77,12 +79,19 @@ class TrayIcon:
         self._idle_icon = _make_icon(False)
         self._rec_icon  = _make_icon(True)
 
-        menu = pystray.Menu(
-            pystray.MenuItem("設定",     lambda icon, item: root.after(0, on_settings)),
-            pystray.MenuItem("認識履歴", lambda icon, item: root.after(0, on_history)),
+        menu_items = [
+            pystray.MenuItem("設定",       lambda icon, item: root.after(0, on_settings)),
+            pystray.MenuItem("認識履歴",   lambda icon, item: root.after(0, on_history)),
+        ]
+        if on_dict:
+            menu_items.append(
+                pystray.MenuItem("個人辞書", lambda icon, item: root.after(0, on_dict))
+            )
+        menu_items += [
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("終了",     lambda icon, item: root.after(0, on_quit)),
-        )
+            pystray.MenuItem("終了",       lambda icon, item: root.after(0, on_quit)),
+        ]
+        menu = pystray.Menu(*menu_items)
 
         self._icon = pystray.Icon(
             "AirType",
@@ -259,12 +268,13 @@ class HistoryWindow:
 
     MAX_ENTRIES = 200
 
-    def __init__(self, master: tk.Tk):
-        self._master  = master
-        self._win     = None
-        self._listbox = None
+    def __init__(self, master: tk.Tk, personal_dict=None):
+        self._master       = master
+        self._win          = None
+        self._listbox      = None
         self._entries: list[tuple[str, str]] = []  # [(time_str, text), ...]
-        self._lock    = threading.Lock()
+        self._lock         = threading.Lock()
+        self._personal_dict = personal_dict  # PersonalDict | None
 
     def add(self, text: str):
         """履歴にエントリを追加する（スレッドセーフ）"""
@@ -333,6 +343,11 @@ class HistoryWindow:
 
         tk.Button(btn_frame, text="コピー",     width=10, command=copy_selected).pack(side=tk.LEFT,  padx=4)
         tk.Button(btn_frame, text="全クリア",   width=10, command=clear_all).pack(    side=tk.LEFT,  padx=4)
+        if self._personal_dict is not None:
+            tk.Button(
+                btn_frame, text="辞書登録", width=10,
+                command=lambda: self._open_register_dialog(win),
+            ).pack(side=tk.LEFT, padx=4)
         tk.Button(btn_frame, text="閉じる",     width=10, command=win.destroy).pack(  side=tk.RIGHT, padx=4)
 
         def on_close():
@@ -349,3 +364,177 @@ class HistoryWindow:
         self._listbox.delete(0, tk.END)
         for time_str, text in reversed(entries):
             self._listbox.insert(tk.END, f"[{time_str}]  {text}")
+
+    def _open_register_dialog(self, parent: tk.Toplevel):
+        """選択中の履歴テキストを個人辞書に登録するダイアログを開く。"""
+        sel = self._listbox.curselection() if self._listbox else None
+        initial_from = ""
+        if sel:
+            with self._lock:
+                entries = list(self._entries)
+            idx = len(entries) - 1 - sel[0]
+            if 0 <= idx < len(entries):
+                initial_from = entries[idx][1]
+
+        dlg = tk.Toplevel(parent)
+        dlg.title("辞書に登録")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        PAD = {"padx": 12, "pady": 5}
+
+        tk.Label(dlg, text="認識テキスト（変換前）:", font=("Yu Gothic UI", 10)).grid(
+            row=0, column=0, sticky="w", **PAD
+        )
+        from_var = tk.StringVar(value=initial_from)
+        from_entry = tk.Entry(dlg, textvariable=from_var, width=44, font=("Yu Gothic UI", 10))
+        from_entry.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+
+        tk.Label(dlg, text="正しいテキスト（変換後）:", font=("Yu Gothic UI", 10)).grid(
+            row=2, column=0, sticky="w", **PAD
+        )
+        to_var = tk.StringVar()
+        to_entry = tk.Entry(dlg, textvariable=to_var, width=44, font=("Yu Gothic UI", 10))
+        to_entry.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
+
+        def register():
+            from tkinter import messagebox as _mb
+            ok = self._personal_dict.add(from_var.get(), to_var.get())
+            if ok:
+                _mb.showinfo("辞書登録完了",
+                             f"{from_var.get()!r} → {to_var.get()!r} を登録しました。",
+                             parent=dlg)
+                dlg.destroy()
+            else:
+                _mb.showwarning("入力エラー", "変換前のテキストを入力してください。", parent=dlg)
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.grid(row=4, column=0, pady=(4, 12))
+        tk.Button(btn_frame, text="登録",       width=10, command=register).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="キャンセル", width=10, command=dlg.destroy).pack(side=tk.LEFT, padx=6)
+
+        dlg.update_idletasks()
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        w,  h  = dlg.winfo_reqwidth(),    dlg.winfo_reqheight()
+        dlg.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+        from_entry.focus_set()
+        from_entry.selection_range(0, tk.END)
+
+
+# ─────────────────────────────────────
+# 個人辞書管理ウィンドウ
+# ─────────────────────────────────────
+class DictWindow:
+    """
+    個人辞書の一覧表示・追加・削除を行うウィンドウ。
+    show() はメインスレッドから呼ぶこと。
+    """
+
+    def __init__(self, master: tk.Tk, personal_dict):
+        self._master        = master
+        self._personal_dict = personal_dict
+        self._win           = None
+
+    def show(self):
+        if self._win and self._win.winfo_exists():
+            self._win.lift()
+            self._win.focus()
+            return
+        self._build()
+
+    def _build(self):
+        win = tk.Toplevel(self._master)
+        win.title("個人辞書")
+        win.geometry("520x420")
+        self._win = win
+
+        PAD = {"padx": 10, "pady": 4}
+
+        # ── エントリ一覧 ──────────────────────────────────────────────
+        tk.Label(win, text="登録済みの変換ルール:", font=("Yu Gothic UI", 10, "bold")).pack(
+            anchor="w", **PAD
+        )
+
+        list_frame = tk.Frame(win)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 4))
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        listbox = tk.Listbox(
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            font=("Yu Gothic UI", 10),
+            selectmode=tk.SINGLE,
+            activestyle="none",
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        def refresh():
+            listbox.delete(0, tk.END)
+            for from_text, to_text in self._personal_dict.entries().items():
+                listbox.insert(tk.END, f"{from_text}  →  {to_text}")
+
+        refresh()
+
+        def delete_selected():
+            from tkinter import messagebox as _mb
+            sel = listbox.curselection()
+            if not sel:
+                return
+            item = listbox.get(sel[0])
+            from_text = item.split("  →  ")[0]
+            if _mb.askyesno("削除確認", f"{from_text!r} を削除しますか？", parent=win):
+                self._personal_dict.remove(from_text)
+                refresh()
+
+        tk.Button(win, text="選択を削除", width=12, command=delete_selected).pack(
+            anchor="w", **PAD
+        )
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=10, pady=6)
+
+        # ── 新規登録フォーム ──────────────────────────────────────────
+        tk.Label(win, text="新規登録:", font=("Yu Gothic UI", 10, "bold")).pack(
+            anchor="w", **PAD
+        )
+
+        form_frame = tk.Frame(win)
+        form_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        tk.Label(form_frame, text="変換前:", font=("Yu Gothic UI", 10), width=7, anchor="e").grid(
+            row=0, column=0, padx=(0, 4), pady=3
+        )
+        from_var = tk.StringVar()
+        tk.Entry(form_frame, textvariable=from_var, width=28, font=("Yu Gothic UI", 10)).grid(
+            row=0, column=1, sticky="ew", pady=3
+        )
+
+        tk.Label(form_frame, text="変換後:", font=("Yu Gothic UI", 10), width=7, anchor="e").grid(
+            row=1, column=0, padx=(0, 4), pady=3
+        )
+        to_var = tk.StringVar()
+        tk.Entry(form_frame, textvariable=to_var, width=28, font=("Yu Gothic UI", 10)).grid(
+            row=1, column=1, sticky="ew", pady=3
+        )
+
+        def add_entry():
+            from tkinter import messagebox as _mb
+            ok = self._personal_dict.add(from_var.get(), to_var.get())
+            if ok:
+                from_var.set("")
+                to_var.set("")
+                refresh()
+            else:
+                _mb.showwarning("入力エラー", "変換前のテキストを入力してください。", parent=win)
+
+        tk.Button(form_frame, text="追加", width=8, command=add_entry).grid(
+            row=0, column=2, rowspan=2, padx=(8, 0)
+        )
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=10, pady=6)
+
+        tk.Button(win, text="閉じる", width=10, command=win.destroy).pack(pady=(0, 8))
+
+        win.protocol("WM_DELETE_WINDOW", win.destroy)

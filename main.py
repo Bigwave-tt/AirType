@@ -74,8 +74,9 @@ from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
 from step4_paster import Paster
-from step5_gui import TrayIcon, SettingsWindow, HistoryWindow
+from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow
 from updater import LlamaUpdater
+from personal_dict import PersonalDict
 
 
 # ─────────────────────────────────────
@@ -330,6 +331,7 @@ class AirType:
             server_port=_whisper_port,
         )
         self.paster = Paster()
+        self.personal_dict = PersonalDict()
 
         # Refiner 使用フラグ (設定画面から切り替え可能)
         self.use_refiner = True
@@ -361,7 +363,7 @@ class AirType:
 
         # ── GUI コンポーネント ────────────────────────────
         # 認識履歴 (どのスレッドからでも add() 可能)
-        self._history = HistoryWindow(root)
+        self._history = HistoryWindow(root, personal_dict=self.personal_dict)
 
         # 設定ウィンドウ (モデル変更 + Refiner ON/OFF コールバック付き)
         self._settings = SettingsWindow(
@@ -372,12 +374,16 @@ class AirType:
             on_refiner_change=self._set_use_refiner,
         )
 
+        # 個人辞書ウィンドウ
+        self._dict_win = DictWindow(root, self.personal_dict)
+
         # システムトレイアイコン
         self._tray = TrayIcon(
             root=root,
             on_settings=self._settings.show,
             on_history=self._history.show,
             on_quit=self.shutdown,
+            on_dict=self._dict_win.show,
         )
 
         # ── API サーバー (クライアントPCからのリモート受付) ──────────
@@ -573,11 +579,14 @@ class AirType:
             else:
                 refined_text = raw_text
 
-            # 3. アクティブウィンドウへペースト
+            # 3. 個人辞書適用
+            refined_text = self.personal_dict.apply(refined_text)
+
+            # 4. アクティブウィンドウへペースト
             self.paster.paste(refined_text)
             print(f"\n[AirType] 完了: {refined_text!r}\n")
 
-            # 4. 認識履歴に追加 (Worker スレッドから安全に呼べる)
+            # 5. 認識履歴に追加 (Worker スレッドから安全に呼べる)
             self._ui_queue.put(("add_history", refined_text))
 
         except Exception as e:

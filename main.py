@@ -31,6 +31,44 @@ import tkinter as tk
 from enum import Enum, auto
 from pathlib import Path
 
+try:
+    from pycaw.pycaw import AudioUtilities
+    _PYCAW_AVAILABLE = True
+except Exception:
+    _PYCAW_AVAILABLE = False
+
+
+def _get_audio_endpoint():
+    """デフォルト出力デバイスの EndpointVolume を返す。失敗時は None。"""
+    if not _PYCAW_AVAILABLE:
+        return None
+    try:
+        return AudioUtilities.GetSpeakers().EndpointVolume
+    except Exception:
+        return None
+
+
+_audio_ep = _get_audio_endpoint()          # 起動時に一度だけ取得
+_mute_saved: bool | None = None            # 録音前のミュート状態を記憶
+
+
+def _mute_system(mute: bool) -> None:
+    """システム出力をミュート (mute=True) / 復元 (mute=False) する。"""
+    global _mute_saved
+    if _audio_ep is None:
+        return
+    try:
+        if mute:
+            _mute_saved = bool(_audio_ep.GetMute())
+            if not _mute_saved:
+                _audio_ep.SetMute(1, None)
+        else:
+            if _mute_saved is not None and not _mute_saved:
+                _audio_ep.SetMute(0, None)
+            _mute_saved = None
+    except Exception as e:
+        print(f"[Mute] ミュート操作失敗: {e}")
+
 import config as _config
 from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
@@ -371,6 +409,7 @@ class AirType:
             self.state = State.RECORDING
         self._log_state("IDLE → RECORDING")
 
+        _mute_system(True)
         self.recorder.start()
         self._ui_queue.put("show")
         self._ui_queue.put("tray_rec")
@@ -386,6 +425,7 @@ class AirType:
             self.state = State.IDLE
         self._log_state("RECORDING → IDLE (WAV をキューに投入)")
 
+        _mute_system(False)
         self._ui_queue.put("hide")
         self._ui_queue.put("tray_idle")
 

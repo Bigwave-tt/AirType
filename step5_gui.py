@@ -226,8 +226,29 @@ class SettingsWindow:
             fg="#888888",
         ).grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
 
+        # ── ログイン時の自動起動 ────────────────────────────
+        sep2 = ttk.Separator(win, orient="horizontal")
+        sep2.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2))
+
+        import autostart as _autostart
+        autostart_var = tk.BooleanVar(value=_autostart.is_enabled())
+        autostart_chk = tk.Checkbutton(
+            win,
+            text="ログイン時に AirType を自動起動する",
+            variable=autostart_var,
+            font=("Yu Gothic UI", 10),
+        )
+        autostart_chk.grid(row=7, column=0, columnspan=2, sticky="w", **PAD)
+
+        tk.Label(
+            win,
+            text="有効にすると Windows ログイン時にバックグラウンドで自動起動します",
+            font=("Yu Gothic UI", 9),
+            fg="#888888",
+        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+
         btn_frame = tk.Frame(win)
-        btn_frame.grid(row=6, column=0, columnspan=2, pady=(4, 12))
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=(4, 12))
 
         def apply():
             selected_display = model_var.get()
@@ -243,6 +264,11 @@ class SettingsWindow:
                     parent=win,
                 )
                 return
+            # 自動起動の設定
+            if autostart_var.get():
+                _autostart.enable()
+            else:
+                _autostart.disable()
             self._on_refiner_change(refiner_var.get())
             self._on_apply(selected_key)
             win.destroy()

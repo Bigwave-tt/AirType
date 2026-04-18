@@ -74,7 +74,7 @@ from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
 from step4_paster import Paster
-from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow, VideoTranscribeWindow
+from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow, VideoTranscribeWindow, FloatingButton
 from updater import LlamaUpdater
 from personal_dict import PersonalDict
 
@@ -334,7 +334,13 @@ class AirType:
         self.personal_dict = PersonalDict()
 
         # Refiner 使用フラグ (設定画面から切り替え可能)
-        self.use_refiner = True
+        self.use_refiner        = True
+        # カスタムアイコンパス (トレイ・ショートカット別)
+        _ui_cfg = _cfg.get("ui", {})
+        self._custom_icon_path          = _ui_cfg.get("custom_icon_path", "")
+        self._custom_shortcut_icon_path = _ui_cfg.get("shortcut_icon_path", "")
+        # 最後の認識テキスト（フローティングボタンから再ペーストするために保持）
+        self._last_text   = ""
 
         # 状態管理
         self.state         = State.IDLE
@@ -365,13 +371,17 @@ class AirType:
         # 認識履歴 (どのスレッドからでも add() 可能)
         self._history = HistoryWindow(root, personal_dict=self.personal_dict)
 
-        # 設定ウィンドウ (モデル変更 + Refiner ON/OFF コールバック付き)
+        # 設定ウィンドウ (モデル変更 + Refiner ON/OFF + アイコン変更コールバック付き)
         self._settings = SettingsWindow(
             master=root,
             get_model=lambda: self.transcriber.model_key,
             on_apply=self._change_model,
             get_use_refiner=lambda: self.use_refiner,
             on_refiner_change=self._set_use_refiner,
+            get_icon_path=lambda: self._custom_icon_path,
+            on_icon_change=self._on_icon_change,
+            get_shortcut_icon_path=lambda: self._custom_shortcut_icon_path,
+            on_shortcut_icon_change=self._on_shortcut_icon_change,
         )
 
         # 個人辞書ウィンドウ
@@ -382,6 +392,16 @@ class AirType:
             root, self.transcriber, personal_dict=self.personal_dict
         )
 
+        # フローティングボタン
+        self._float_btn = FloatingButton(
+            master=root,
+            on_press_record=self._handle_ptt_press,
+            on_release_record=self._handle_ptt_release,
+            on_paste=self._handle_repaste,
+        )
+        if _cfg.get("ui", {}).get("floating_button", False):
+            self._float_btn.show()
+
         # システムトレイアイコン
         self._tray = TrayIcon(
             root=root,
@@ -390,6 +410,9 @@ class AirType:
             on_quit=self.shutdown,
             on_dict=self._dict_win.show,
             on_video_transcribe=self._video_win.show,
+            on_float_toggle=self._toggle_float_button,
+            get_float_visible=lambda: self._float_btn.visible,
+            icon_path=self._custom_icon_path,
         )
 
         # ── API サーバー (クライアントPCからのリモート受付) ──────────
@@ -495,6 +518,7 @@ class AirType:
         self.recorder.start()
         self._ui_queue.put("show")
         self._ui_queue.put("tray_rec")
+        self._ui_queue.put("float_rec")
 
     def _handle_ptt_release(self):
         if not self._ptt_key_down:
@@ -520,7 +544,7 @@ class AirType:
 
     # ── UI ポーリング (メインスレッド) ─────────────────────────────────
     def _poll_ui_queue(self):
-        """50ms ごとに UI キューを消化して OSD・トレイ・履歴を更新する"""
+        """50ms ごとに UI キューを消化して OSD・トレイ・履歴・フローティングボタンを更新する"""
         try:
             while True:
                 cmd = self._ui_queue.get_nowait()
@@ -532,6 +556,12 @@ class AirType:
                     self._tray.set_recording(True)
                 elif cmd == "tray_idle":
                     self._tray.set_recording(False)
+                elif cmd == "float_rec":
+                    self._float_btn.set_recording()
+                elif cmd == "float_idle":
+                    self._float_btn.set_idle()
+                elif isinstance(cmd, tuple) and cmd[0] == "float_done":
+                    self._float_btn.set_done(cmd[1])
                 elif isinstance(cmd, tuple) and cmd[0] == "add_history":
                     self._history.add(cmd[1])
         except queue.Empty:
@@ -571,6 +601,7 @@ class AirType:
             raw_text = self.transcriber.transcribe(wav_path)
             if not raw_text.strip():
                 print("[AirType] 音声が認識されませんでした")
+                self._ui_queue.put("float_idle")
                 return
 
             # 2. テキスト整形 (use_refiner が False なら Whisper 結果をそのまま使用)
@@ -592,11 +623,18 @@ class AirType:
             self.paster.paste(refined_text)
             print(f"\n[AirType] 完了: {refined_text!r}\n")
 
-            # 5. 認識履歴に追加 (Worker スレッドから安全に呼べる)
+            # 5. 最後のテキストを保持（フローティングボタンからの再ペースト用）
+            self._last_text = refined_text
+
+            # 6. フローティングボタンを「ペースト可」状態に
+            self._ui_queue.put(("float_done", refined_text))
+
+            # 7. 認識履歴に追加 (Worker スレッドから安全に呼べる)
             self._ui_queue.put(("add_history", refined_text))
 
         except Exception as e:
             print(f"[AirType] パイプラインエラー: {e}")
+            self._ui_queue.put("float_idle")
 
         finally:
             if wav_path and wav_path.exists():
@@ -618,11 +656,44 @@ class AirType:
         except Exception:
             pass
 
+    def _handle_repaste(self):
+        """フローティングボタンの done 状態クリック時: 最後のテキストを再ペースト。
+        WS_EX_NOACTIVATE によりボタンクリック時のフォーカスは移動しないため、
+        ペーストは直前にアクティブだったウィンドウへ届く。
+        """
+        if not self._last_text:
+            return
+        text = self._last_text
+        self._ui_queue.put("float_idle")
+        threading.Thread(
+            target=self.paster.paste,
+            args=(text,),
+            daemon=True,
+            name="Repaste",
+        ).start()
+
+    def _toggle_float_button(self):
+        """トレイメニューからフローティングボタンの表示を切り替える。"""
+        self._float_btn.toggle()
+
     def _set_use_refiner(self, enabled: bool):
         """Refiner の使用有無を切り替える（設定ウィンドウから呼ばれる）"""
         self.use_refiner = enabled
         state_str = "ON" if enabled else "OFF"
         print(f"[AirType] LLM テキスト整形: {state_str}")
+
+    def _on_icon_change(self, path_str: str):
+        """トレイアイコンを変更し、設定を保存してトレイアイコンを即時更新する。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("ui", "custom_icon_path", path_str)
+        self._custom_icon_path = path_str
+        self._tray.update_icon(path_str)
+
+    def _on_shortcut_icon_change(self, path_str: str):
+        """ショートカットアイコンパスを保存する（適用はボタン押下時に別途実行）。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("ui", "shortcut_icon_path", path_str)
+        self._custom_shortcut_icon_path = path_str
 
     def _change_model(self, model_key: str):
         """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）"""

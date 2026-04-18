@@ -264,7 +264,12 @@ class WhisperTranscriber:
         self._use_server  = False
 
     # ── 公開 API ─────────────────────────────────────────────────────
-    def transcribe(self, wav_path: Path, infer_timeout: int | None = None) -> str:
+    def transcribe(
+        self,
+        wav_path: Path,
+        infer_timeout: int | None = None,
+        force_cli: bool = False,
+    ) -> str:
         """
         WAV ファイルを文字起こしして結合テキストを返す。
 
@@ -275,6 +280,11 @@ class WhisperTranscriber:
         infer_timeout : int | None
             推論タイムアウト秒数。None の場合はデフォルト値を使用。
             長尺動画など時間がかかる場合は大きな値 (例: 600) を指定する。
+        force_cli : bool
+            True にするとサーバーモードをバイパスして whisper-cli.exe を直接使用する。
+            動画など大きな WAV ファイルを扱う場合に指定する。
+            （whisper-server の HTTP API はリクエストボディサイズに上限があるため、
+              長尺音声を送ると最初の数十秒しか文字起こしされない場合がある）
 
         Returns
         -------
@@ -287,7 +297,7 @@ class WhisperTranscriber:
         print(f"[Transcriber] 文字起こし開始: {wav_path.name}")
         self._check_audio_level(wav_path)
 
-        if self._use_server:
+        if self._use_server and not force_cli:
             return self._transcribe_server(wav_path, infer_timeout=infer_timeout)
         return self._transcribe_cli(wav_path, infer_timeout=infer_timeout)
 

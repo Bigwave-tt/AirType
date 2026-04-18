@@ -72,13 +72,51 @@ class Recorder:
         self._preroll_samples = 0
 
         # ストリームをアプリ起動時から常時稼働
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype=DTYPE,
-            callback=self._callback,
-        )
+        self._stream = self._open_stream()
         self._stream.start()
+
+    def _open_stream(self) -> sd.InputStream:
+        """
+        デフォルトデバイスでストリームを開く。失敗した場合は
+        利用可能な入力デバイスを順に試す。
+        """
+        # まずデフォルトデバイス (device=None) で試みる
+        try:
+            return sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype=DTYPE,
+                callback=self._callback,
+            )
+        except Exception as e:
+            print(f"[Recorder] デフォルトデバイスで開けませんでした: {e}")
+
+        # 利用可能な入力デバイスを列挙して最初に成功したものを使う
+        try:
+            devices = sd.query_devices()
+        except Exception as e:
+            raise RuntimeError(f"音声デバイスを列挙できません: {e}") from e
+
+        for i, dev in enumerate(devices):
+            if dev.get("max_input_channels", 0) < 1:
+                continue
+            try:
+                stream = sd.InputStream(
+                    device=i,
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    dtype=DTYPE,
+                    callback=self._callback,
+                )
+                print(f"[Recorder] デバイス #{i} '{dev['name']}' を使用します")
+                return stream
+            except Exception:
+                continue
+
+        raise RuntimeError(
+            "使用可能なマイク入力デバイスが見つかりません。\n"
+            "マイクが接続されているか確認してください。"
+        )
 
     def _callback(self, indata: np.ndarray, frames: int, time_info, status):
         """sounddevice のコールバック: 収集中はフレームを蓄積、待機中はプリロールバッファを更新"""

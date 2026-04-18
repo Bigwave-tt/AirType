@@ -227,12 +227,13 @@ class LlamaRefiner:
         server_port : int | None
             llama-server が使用するポート。None の場合はデフォルト値を使用。0 で空きポート自動割り当て。
         """
-        self._fallback     = RuleBasedRefiner()
-        self._available    = False
-        self._server_proc  = None
-        self._server_ready = threading.Event()
-        self._use_server   = False
-        self.model_key     = model
+        self._fallback              = RuleBasedRefiner()
+        self._available             = False
+        self._server_proc           = None
+        self._server_ready          = threading.Event()
+        self._use_server            = False
+        self._attached_to_existing  = False   # 外部サーバーへの接続フラグ
+        self.model_key              = model
 
         # ── パス解決 ──────────────────────────────────────────────────
         from pathlib import Path as _Path
@@ -271,6 +272,17 @@ class LlamaRefiner:
         if self._llama_server.exists():
             self._use_server = True
             self._available  = True
+
+            # 既存サーバーがポートで応答していれば共有（新規起動しない）
+            if self._probe_existing_server():
+                print(
+                    f"[Refiner] ポート {self._server_port} に既存の llama-server を検出。"
+                    "共有モードで接続します（新規起動スキップ）"
+                )
+                self._server_ready.set()
+                self._attached_to_existing = True
+                return
+
             print(f"[Refiner] LLM整形: {model_path.name} (サーバーモード, ポート {self._server_port})")
             print(f"[Refiner] バックグラウンドでサーバーを起動中...")
             threading.Thread(
@@ -364,8 +376,21 @@ class LlamaRefiner:
 
         return refined
 
+    def _probe_existing_server(self) -> bool:
+        """起動前に既存の llama-server がポートで動作しているか確認する。"""
+        health_url = f"http://localhost:{self._server_port}/health"
+        try:
+            with urllib.request.urlopen(health_url, timeout=2) as resp:
+                return json.loads(resp.read()).get("status") == "ok"
+        except Exception:
+            return False
+
     def shutdown(self):
         """サーバープロセスを終了する（アプリ終了時に呼ぶ）。"""
+        if self._attached_to_existing:
+            # 外部プロセスは終了させない
+            print("[Refiner] 共有モードのため llama-server の終了をスキップします")
+            return
         if self._server_proc and self._server_proc.poll() is None:
             print("[Refiner] llama-server 終了中...")
             self._server_proc.terminate()

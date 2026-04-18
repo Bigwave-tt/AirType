@@ -11,6 +11,8 @@ AirType - Step 5: GUI コンポーネント
   tkinter 操作はすべて root.after(0, ...) 経由でメインスレッドに委譲する。
 """
 
+import ctypes
+import sys
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -51,6 +53,18 @@ def _make_icon(recording: bool) -> "Image.Image":
     return img
 
 
+def _load_custom_tray_icon(path_str: str):
+    """カスタム画像を 64×64 RGBA PIL Image に変換して返す。失敗時は None。"""
+    if not _HAS_TRAY or not path_str:
+        return None
+    try:
+        import icon_manager
+        return icon_manager.make_tray_image(path_str)
+    except Exception as e:
+        print(f"[TrayIcon] カスタムアイコン読み込み失敗: {e}")
+        return None
+
+
 # ─────────────────────────────────────
 # システムトレイアイコン
 # ─────────────────────────────────────
@@ -70,6 +84,9 @@ class TrayIcon:
         on_quit: Callable,
         on_dict: Callable = None,
         on_video_transcribe: Callable = None,
+        on_float_toggle: Callable = None,
+        get_float_visible: "Callable[[], bool]" = None,
+        icon_path: str = "",
     ):
         self._root = root
         self._icon = None
@@ -77,8 +94,9 @@ class TrayIcon:
         if not _HAS_TRAY:
             return
 
-        self._idle_icon = _make_icon(False)
-        self._rec_icon  = _make_icon(True)
+        custom = _load_custom_tray_icon(icon_path)
+        self._idle_icon = custom if custom is not None else _make_icon(False)
+        self._rec_icon  = _make_icon(True)  # 録音中は常にデフォルト赤アイコン
 
         menu_items = [
             pystray.MenuItem("設定",       lambda icon, item: root.after(0, on_settings)),
@@ -91,6 +109,14 @@ class TrayIcon:
         if on_video_transcribe:
             menu_items.append(
                 pystray.MenuItem("動画文字起こし", lambda icon, item: root.after(0, on_video_transcribe))
+            )
+        if on_float_toggle and get_float_visible:
+            menu_items.append(
+                pystray.MenuItem(
+                    "フローティングボタン",
+                    lambda icon, item: root.after(0, on_float_toggle),
+                    checked=lambda item: get_float_visible(),
+                )
             )
         menu_items += [
             pystray.Menu.SEPARATOR,
@@ -117,12 +143,194 @@ class TrayIcon:
         self._icon.icon  = self._rec_icon  if recording else self._idle_icon
         self._icon.title = "🎤 録音中..."  if recording else "AirType - 無変換キーで録音"
 
+    def update_icon(self, path_str: str):
+        """待機中アイコンをカスタム画像に差し替える（空文字でデフォルトに戻す）。"""
+        if not self._icon:
+            return
+        custom = _load_custom_tray_icon(path_str) if path_str else None
+        self._idle_icon = custom if custom is not None else _make_icon(False)
+        self._icon.icon = self._idle_icon
+
     def stop(self):
         if self._icon:
             try:
                 self._icon.stop()
             except Exception:
                 pass
+
+
+# ─────────────────────────────────────
+# フローティングボタン
+# ─────────────────────────────────────
+class FloatingButton:
+    """
+    常に最前面に表示されるドラッグ可能なフローティングボタン。
+
+    状態:
+      idle      - 待機中（青）  : クリックで録音開始
+      recording - 録音中（赤）  : クリックで録音停止
+      done      - 認識完了（緑）: クリックで最後のテキストを再ペースト
+
+    WS_EX_NOACTIVATE を設定するため、クリックしてもフォーカスを奪わない。
+    done 状態でクリックしたとき、直前までアクティブだったウィンドウへのペーストが正しく届く。
+    """
+
+    _IDLE_BG  = "#1565C0"
+    _REC_BG   = "#C62828"
+    _DONE_BG  = "#2E7D32"
+    _FG       = "white"
+    _FONT     = ("Yu Gothic UI", 10, "bold")
+    _W, _H    = 130, 36
+    _DRAG_THR = 6          # px: これを超えたらドラッグとみなす
+    _DONE_TTL = 30_000     # ms: done 状態の自動リセット時間
+
+    def __init__(
+        self,
+        master: tk.Tk,
+        on_press_record: Callable,
+        on_release_record: Callable,
+        on_paste: Callable,
+    ):
+        self._master            = master
+        self._on_press_record   = on_press_record
+        self._on_release_record = on_release_record
+        self._on_paste          = on_paste
+        self._visible           = False
+        self._state             = "idle"
+        self._drag_x            = 0
+        self._drag_y            = 0
+        self._dragged           = False
+        self._no_activate_set   = False
+
+        win = tk.Toplevel(master)
+        win.overrideredirect(True)
+        win.wm_attributes("-topmost", True)
+        win.wm_attributes("-alpha", 0.92)
+        win.configure(bg=self._IDLE_BG)
+        win.withdraw()
+        self._win = win
+
+        self._lbl = tk.Label(
+            win,
+            text="🎤 AirType",
+            font=self._FONT,
+            fg=self._FG,
+            bg=self._IDLE_BG,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        )
+        self._lbl.pack(fill=tk.BOTH, expand=True)
+
+        # 初期位置: 画面右下
+        win.update_idletasks()
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        win.geometry(f"{self._W}x{self._H}+{sw - self._W - 20}+{sh - self._H - 80}")
+
+        for w in (win, self._lbl):
+            w.bind("<ButtonPress-1>",  self._on_press)
+            w.bind("<B1-Motion>",       self._on_drag)
+            w.bind("<ButtonRelease-1>", self._on_release)
+
+    # ── WS_EX_NOACTIVATE: クリックしてもキーボードフォーカスを奪わない ──
+    def _apply_no_activate(self):
+        if self._no_activate_set or sys.platform != "win32":
+            return
+        try:
+            hwnd             = self._win.winfo_id()
+            GWL_EXSTYLE      = -20
+            WS_EX_NOACTIVATE = 0x08000000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE
+            )
+            self._no_activate_set = True
+        except Exception as e:
+            print(f"[FloatingButton] WS_EX_NOACTIVATE 設定失敗: {e}")
+
+    # ── マウスイベント ────────────────────────────────────────────────
+    def _on_press(self, event):
+        self._drag_x  = event.x_root
+        self._drag_y  = event.y_root
+        self._dragged = False
+        # WS_EX_NOACTIVATE 設定時でも B1-Motion を受け取れるよう明示的にキャプチャ
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.SetCapture(self._win.winfo_id())
+            except Exception:
+                pass
+
+    def _on_drag(self, event):
+        if (abs(event.x_root - self._drag_x) > self._DRAG_THR
+                or abs(event.y_root - self._drag_y) > self._DRAG_THR):
+            self._dragged = True
+        if self._dragged:
+            new_x = self._win.winfo_x() + (event.x_root - self._drag_x)
+            new_y = self._win.winfo_y() + (event.y_root - self._drag_y)
+            self._win.geometry(f"+{new_x}+{new_y}")
+            self._drag_x = event.x_root
+            self._drag_y = event.y_root
+
+    def _on_release(self, event):
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.ReleaseCapture()
+            except Exception:
+                pass
+        if self._dragged:
+            return
+        if self._state == "idle":
+            self._on_press_record()
+        elif self._state == "recording":
+            self._on_release_record()
+        elif self._state == "done":
+            self._on_paste()
+
+    # ── 状態変更（メインスレッドから呼ぶ）────────────────────────────
+    def set_idle(self):
+        self._state = "idle"
+        self._lbl.configure(text="🎤 AirType", bg=self._IDLE_BG)
+        self._win.configure(bg=self._IDLE_BG)
+
+    def set_recording(self):
+        self._state = "recording"
+        self._lbl.configure(text="⏹ 停止", bg=self._REC_BG)
+        self._win.configure(bg=self._REC_BG)
+
+    def set_done(self, text: str):
+        self._state = "done"
+        preview = (text[:10] + "…") if len(text) > 10 else text
+        self._lbl.configure(text=f"📋 {preview}", bg=self._DONE_BG)
+        self._win.configure(bg=self._DONE_BG)
+        # 一定時間後に自動リセット
+        self._master.after(self._DONE_TTL, self._auto_reset)
+
+    def _auto_reset(self):
+        if self._state == "done":
+            self.set_idle()
+
+    # ── 表示制御 ─────────────────────────────────────────────────────
+    def show(self):
+        self._visible = True
+        self._win.deiconify()
+        self._win.lift()
+        self._win.wm_attributes("-topmost", True)
+        self._apply_no_activate()
+
+    def hide(self):
+        self._visible = False
+        self._win.withdraw()
+
+    def toggle(self):
+        if self._visible:
+            self.hide()
+        else:
+            self.show()
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
 
 
 # ─────────────────────────────────────
@@ -147,12 +355,20 @@ class SettingsWindow:
         on_apply: Callable[[str], None],
         get_use_refiner: Callable[[], bool] = lambda: True,
         on_refiner_change: Callable[[bool], None] = lambda v: None,
+        get_icon_path: "Callable[[], str]" = lambda: "",
+        on_icon_change: "Callable[[str], None]" = lambda p: None,
+        get_shortcut_icon_path: "Callable[[], str]" = lambda: "",
+        on_shortcut_icon_change: "Callable[[str], None]" = lambda p: None,
     ):
         self._master    = master
         self._get_model = get_model
         self._on_apply  = on_apply
-        self._get_use_refiner  = get_use_refiner
-        self._on_refiner_change = on_refiner_change
+        self._get_use_refiner           = get_use_refiner
+        self._on_refiner_change         = on_refiner_change
+        self._get_icon_path             = get_icon_path
+        self._on_icon_change            = on_icon_change
+        self._get_shortcut_icon_path    = get_shortcut_icon_path
+        self._on_shortcut_icon_change   = on_shortcut_icon_change
         self._win = None
 
     def show(self):
@@ -252,8 +468,126 @@ class SettingsWindow:
             fg="#888888",
         ).grid(row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
 
+        # ── アイコン設定 ────────────────────────────────────────────────
+        sep3 = ttk.Separator(win, orient="horizontal")
+        sep3.grid(row=9, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2))
+
+        tk.Label(win, text="アイコン設定:", font=("Yu Gothic UI", 10, "bold")).grid(
+            row=10, column=0, columnspan=2, sticky="w", **PAD
+        )
+
+        def _make_icon_row(parent, var, title, row_offset):
+            """アイコン行（ラベル + 参照ボタン + デフォルトに戻すボタン）を生成する。"""
+            tk.Label(parent, text=title, font=("Yu Gothic UI", 9, "bold")).grid(
+                row=row_offset, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 0)
+            )
+            frame = tk.Frame(parent)
+            frame.grid(row=row_offset + 1, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 0))
+
+            lbl = tk.Label(frame, textvariable=var, font=("Yu Gothic UI", 9),
+                           fg="#444444", anchor="w", width=36)
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            def _browse(v=var):
+                from tkinter import filedialog
+                p = filedialog.askopenfilename(
+                    title="アイコン画像を選択",
+                    filetypes=[
+                        ("画像ファイル", "*.png *.jpg *.jpeg *.bmp *.gif *.ico *.webp"),
+                        ("すべてのファイル", "*.*"),
+                    ],
+                    parent=win,
+                )
+                if p:
+                    v.set(p)
+
+            def _reset(v=var):
+                v.set("")
+
+            tk.Button(frame, text="参照...", width=8, command=_browse).pack(side=tk.LEFT, padx=(4, 2))
+            tk.Button(frame, text="デフォルトに戻す", command=_reset).pack(side=tk.LEFT, padx=(2, 0))
+
+        # トレイアイコン行
+        tray_icon_var = tk.StringVar(value=self._get_icon_path())
+        _make_icon_row(win, tray_icon_var, "トレイアイコン:", 11)
+
+        # デスクトップショートカットアイコン行
+        shortcut_icon_var = tk.StringVar(value=self._get_shortcut_icon_path())
+        _make_icon_row(win, shortcut_icon_var, "デスクトップショートカットアイコン:", 13)
+
+        tk.Label(
+            win,
+            text="PNG / ICO 等に対応。白・単色の背景は自動で除去されます",
+            font=("Yu Gothic UI", 9),
+            fg="#888888",
+        ).grid(row=15, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 2))
+
+        def _apply_ico_to_lnk(ico_path, lnk_paths):
+            """ico_path を指定した .lnk リストに適用し、結果を表示する。"""
+            import icon_manager
+            from pathlib import Path as _Path
+            count = sum(
+                1 for lnk in lnk_paths
+                if icon_manager.update_shortcut_icon(_Path(lnk), ico_path)
+            )
+            if count > 0:
+                messagebox.showinfo(
+                    "更新完了",
+                    f"{count} 個のショートカットのアイコンを更新しました。\n"
+                    "すぐに反映されない場合はエクスプローラーを再起動してください。",
+                    parent=win,
+                )
+            else:
+                messagebox.showerror(
+                    "更新失敗",
+                    "ショートカットの更新に失敗しました。\n"
+                    "pywin32 がインストールされているか確認してください:\n"
+                    "  pip install pywin32",
+                    parent=win,
+                )
+
+        def _update_shortcuts():
+            """ICO を生成してデスクトップショートカットのアイコンを更新する。"""
+            sc_path = shortcut_icon_var.get()
+            if not sc_path:
+                messagebox.showwarning(
+                    "アイコン未選択",
+                    "デスクトップショートカットアイコンを先に選択してください。",
+                    parent=win,
+                )
+                return
+            try:
+                import icon_manager
+                ico_path = icon_manager.generate_ico(sc_path)
+                shortcuts = icon_manager.find_desktop_shortcuts()
+                if shortcuts:
+                    _apply_ico_to_lnk(ico_path, shortcuts)
+                else:
+                    # 自動検出できなかった場合は手動選択
+                    if messagebox.askyesno(
+                        "ショートカットが見つかりません",
+                        "AirType のショートカット (.lnk) を自動検出できませんでした。\n\n"
+                        "手動でショートカットファイルを選択しますか？",
+                        parent=win,
+                    ):
+                        from tkinter import filedialog
+                        lnk_path = filedialog.askopenfilename(
+                            title="AirType のショートカットを選択",
+                            filetypes=[("ショートカット", "*.lnk"), ("すべてのファイル", "*.*")],
+                            parent=win,
+                        )
+                        if lnk_path:
+                            _apply_ico_to_lnk(ico_path, [lnk_path])
+            except Exception as e:
+                messagebox.showerror("エラー", str(e), parent=win)
+
+        tk.Button(
+            win, text="ショートカットのアイコンを今すぐ更新",
+            command=_update_shortcuts,
+        ).grid(row=16, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 6))
+
         btn_frame = tk.Frame(win)
-        btn_frame.grid(row=9, column=0, columnspan=2, pady=(4, 12))
+        btn_frame.grid(row=17, column=0, columnspan=2, pady=(4, 12))
 
         def apply():
             selected_display = model_var.get()
@@ -275,6 +609,8 @@ class SettingsWindow:
             else:
                 _autostart.disable()
             self._on_refiner_change(refiner_var.get())
+            self._on_icon_change(tray_icon_var.get())
+            self._on_shortcut_icon_change(shortcut_icon_var.get())
             self._on_apply(selected_key)
             win.destroy()
 
@@ -673,7 +1009,9 @@ class VideoTranscribeWindow:
 
                 win.after(0, lambda: status_var.set("文字起こし中... (しばらくお待ちください)"))
                 text = self._transcriber.transcribe(
-                    tmp_wav, infer_timeout=self._VIDEO_INFER_TIMEOUT
+                    tmp_wav,
+                    infer_timeout=self._VIDEO_INFER_TIMEOUT,
+                    force_cli=True,
                 )
 
                 if self._personal_dict:
@@ -725,6 +1063,7 @@ class VideoTranscribeWindow:
         scrollbar.config(command=textbox.yview)
 
         textbox.insert("1.0", text if text.strip() else "（テキストを検出できませんでした）")
+        textbox.focus_set()  # ウィンドウを開いたらテキストにフォーカス
 
         btn_frame = tk.Frame(win)
         btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -762,7 +1101,7 @@ class VideoTranscribeWindow:
 
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        w,  h  = win.winfo_reqwidth(),    win.winfo_reqheight()
+        w,  h  = 620, 460  # ウィンドウの実際のサイズで中央配置
         win.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
 
     def _show_error(self, progress_win: tk.Toplevel, error_msg: str):

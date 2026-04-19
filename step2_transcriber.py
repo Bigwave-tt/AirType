@@ -297,9 +297,13 @@ class WhisperTranscriber:
         print(f"[Transcriber] 文字起こし開始: {wav_path.name}")
         self._check_audio_level(wav_path)
 
+        t0 = time.perf_counter()
         if self._use_server and not force_cli:
-            return self._transcribe_server(wav_path, infer_timeout=infer_timeout)
-        return self._transcribe_cli(wav_path, infer_timeout=infer_timeout)
+            result = self._transcribe_server(wav_path, infer_timeout=infer_timeout)
+        else:
+            result = self._transcribe_cli(wav_path, infer_timeout=infer_timeout)
+        print(f"[Transcriber] 所要時間: {time.perf_counter() - t0:.2f}秒")
+        return result
 
     def shutdown(self):
         """サーバープロセスを終了する（アプリ終了時に呼ぶ）。"""

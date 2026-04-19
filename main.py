@@ -73,6 +73,33 @@ import config as _config
 from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
+
+def _build_transcriber(cfg: dict, llama_gate):
+    """
+    config の transcriber.backend に応じて WhisperTranscriber または
+    SenseVoiceTranscriber を生成して返す。
+    """
+    t_cfg   = cfg.get("transcriber", {})
+    backend = t_cfg.get("backend", "whisper")
+
+    if backend == "sensevoice":
+        from step2_sensevoice import SenseVoiceTranscriber
+        sv_dir = _config.resolve_dir(t_cfg.get("sensevoice_dir", ""), "sensevoice-onnx")
+        return SenseVoiceTranscriber(
+            model_dir=sv_dir,
+            language=t_cfg.get("language", "ja"),
+            startup_gate=llama_gate,
+        )
+
+    # デフォルト: whisper
+    whisper_cfg  = cfg["whisper"]
+    whisper_dir  = _config.resolve_dir(whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
+    whisper_port = _config.resolve_port(int(whisper_cfg["server_port"]))
+    return WhisperTranscriber(
+        startup_gate=llama_gate,
+        whisper_dir=whisper_dir,
+        server_port=whisper_port,
+    )
 from step4_paster import Paster
 from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow, VideoTranscribeWindow, FloatingButton
 from updater import LlamaUpdater
@@ -310,26 +337,18 @@ class AirType:
         self._root = root
 
         # 設定読み込み
-        _cfg         = _config.load()
-        _whisper_cfg = _cfg["whisper"]
-        _llama_cfg   = _cfg["llama"]
-        _whisper_dir = _config.resolve_dir(_whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
-        _llama_dir   = _config.resolve_dir(_llama_cfg["dir"],   "llama.cpp-windows-vulkan")
-        _whisper_port = _config.resolve_port(int(_whisper_cfg["server_port"]))
-        _llama_port   = _config.resolve_port(int(_llama_cfg["server_port"]))
+        _cfg       = _config.load()
+        _llama_cfg = _cfg["llama"]
+        _llama_dir  = _config.resolve_dir(_llama_cfg["dir"], "llama.cpp-windows-vulkan")
+        _llama_port = _config.resolve_port(int(_llama_cfg["server_port"]))
 
         # 各モジュール初期化
         # 起動順: refiner → transcriber の順で VRAM を優先確保させる
         # llama-server がサーバーモードの場合、その準備完了イベントをゲートとして渡す
-        # → whisper-server は llama-server のロード完了後に起動し VRAM 競合を回避する
         self.recorder = Recorder()
         self.refiner  = LlamaRefiner(llama_dir=_llama_dir, server_port=_llama_port)
-        _whisper_gate = self.refiner._server_ready if self.refiner._use_server else None
-        self.transcriber = WhisperTranscriber(
-            startup_gate=_whisper_gate,
-            whisper_dir=_whisper_dir,
-            server_port=_whisper_port,
-        )
+        _llama_gate   = self.refiner._server_ready if self.refiner._use_server else None
+        self.transcriber = _build_transcriber(_cfg, _llama_gate)
         self.paster = Paster()
         self.personal_dict = PersonalDict()
 
@@ -696,7 +715,13 @@ class AirType:
         self._custom_shortcut_icon_path = path_str
 
     def _change_model(self, model_key: str):
-        """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）"""
+        """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）。
+        SenseVoice バックエンド使用時は Whisper モデル変更は不要なため何もしない。
+        """
+        if not isinstance(self.transcriber, WhisperTranscriber):
+            print(f"[AirType] SenseVoice バックエンド使用中のためモデル変更をスキップ: {model_key}")
+            return
+
         def _do_change():
             try:
                 print(f"[AirType] モデルを変更中: {model_key}")

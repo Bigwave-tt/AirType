@@ -360,6 +360,7 @@ class LlamaRefiner:
         if not self._available:
             return self._fallback.refine(raw_text)
 
+        t0 = time.perf_counter()
         try:
             if self._use_server:
                 refined = self._llm_refine_server(raw_text)
@@ -368,6 +369,7 @@ class LlamaRefiner:
         except Exception as e:
             print(f"[Refiner] エラー ({type(e).__name__}): {e}。ルールベースにフォールバックします")
             return self._fallback.refine(raw_text)
+        print(f"[Refiner] 所要時間: {time.perf_counter() - t0:.2f}秒")
 
         # 過剰編集チェック: 元テキストとの類似度が低い場合はルールベースに差し替え
         if not _is_faithful(raw_text, refined):

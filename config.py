@@ -40,6 +40,11 @@ _DEFAULTS: dict = {
         "custom_icon_path":     "",     # トレイアイコン画像のパス (空文字 = デフォルト)
         "shortcut_icon_path":   "",     # デスクトップショートカットアイコンのパス
     },
+    "transcriber": {
+        "backend":        "whisper",  # "whisper" | "sensevoice"
+        "sensevoice_dir": "",         # 空文字 = 親フォルダ/sensevoice-onnx
+        "language":       "ja",
+    },
 }
 
 

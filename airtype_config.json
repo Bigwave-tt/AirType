@@ -1,36 +1,38 @@
 {
   "_comment": "AirType 設定ファイル。このファイルを編集して動作をカスタマイズできます。",
-
   "network": {
     "_comment_server_url": "client.py が接続するサーバーのURL",
     "server_url": "http://YOUR_SERVER_IP:8000/dictate",
-
     "_comment_host": "api_server.py がリッスンするアドレス (0.0.0.0=全IF, 127.0.0.1=ローカルのみ)",
     "host": "0.0.0.0",
-
     "_comment_port": "api_server.py のポート番号",
     "port": 8000,
-
     "_comment_api_key": "APIキー認証。空文字の場合は認証なし。client.py と api_server.py で同じ値を設定すること",
     "api_key": "",
-
     "_comment_request_timeout": "client.py のリクエストタイムアウト (秒)",
     "request_timeout": 60
   },
-
   "whisper": {
     "_comment_dir": "whisper.cpp フォルダのパス。空文字の場合は AirType の親フォルダ内の whisper.cpp-windows-vulkan を使用",
     "dir": "",
-
     "_comment_server_port": "whisper-server が使用するポート。0 の場合は空きポートを自動割り当て",
     "server_port": 18766
   },
-
   "llama": {
     "_comment_dir": "llama.cpp フォルダのパス。空文字の場合は AirType の親フォルダ内の llama.cpp-windows-vulkan を使用",
     "dir": "",
-
     "_comment_server_port": "llama-server が使用するポート。0 の場合は空きポートを自動割り当て",
     "server_port": 18765
+  },
+  "ui": {
+    "custom_icon_path": "C:/Users/t-tak/OneDrive/Downloads/DesktopIcon.png",
+    "shortcut_icon_path": "C:/Users/t-tak/OneDrive/Downloads/DesktopIcon.png"
+  },
+  "transcriber": {
+    "_comment_backend": "使用する STT バックエンド。\"whisper\" または \"sensevoice\"",
+    "backend": "sensevoice",
+    "_comment_sensevoice_dir": "sensevoice-onnx フォルダのパス。空文字の場合は AirType の親フォルダ内の sensevoice-onnx を使用",
+    "sensevoice_dir": "",
+    "language": "ja"
   }
 }

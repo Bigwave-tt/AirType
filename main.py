@@ -41,41 +41,98 @@ except Exception:
 def _get_audio_endpoint():
     """デフォルト出力デバイスの EndpointVolume を返す。失敗時は None。"""
     if not _PYCAW_AVAILABLE:
+        print("[Mute] pycaw が見つかりません。pip install pycaw で導入してください。")
         return None
     try:
         return AudioUtilities.GetSpeakers().EndpointVolume
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"[Mute] AudioEndpoint 取得失敗: {e}")
 
 
 _audio_ep = _get_audio_endpoint()          # 起動時に一度だけ取得
-_mute_saved: bool | None = None            # 録音前のミュート状態を記憶
+_mute_saved:   bool  | None = None        # 録音前のミュート状態を記憶
+_volume_saved: float | None = None        # 録音前の音量を記憶 (duck モード用)
+
+_DUCK_VOLUME = 0.15                        # duck モード時の音量 (0.0–1.0)
 
 
-def _mute_system(mute: bool) -> None:
-    """システム出力をミュート (mute=True) / 復元 (mute=False) する。"""
-    global _mute_saved
+def _mute_system(mute: bool, mode: str = "mute") -> None:
+    """
+    mode="mute" : 録音中はシステム出力をミュート
+    mode="duck" : 録音中は音量を _DUCK_VOLUME まで下げる
+    mode="off"  : 何もしない
+    """
+    global _mute_saved, _volume_saved
+    if mode == "off":
+        return
     if _audio_ep is None:
+        print("[Mute] _audio_ep が None のためスキップ (pycaw 未インストール?)")
         return
     try:
         if mute:
-            _mute_saved = bool(_audio_ep.GetMute())
-            if not _mute_saved:
-                _audio_ep.SetMute(1, None)
+            if mode == "mute":
+                _mute_saved = bool(_audio_ep.GetMute())
+                print(f"[Mute] ミュート開始 (元のミュート状態: {_mute_saved})")
+                if not _mute_saved:
+                    _audio_ep.SetMute(1, None)
+            elif mode == "duck":
+                _volume_saved = _audio_ep.GetMasterVolumeLevelScalar()
+                print(f"[Mute] duck 開始 (現在音量: {_volume_saved:.2f} → {_DUCK_VOLUME:.2f})")
+                if _volume_saved > _DUCK_VOLUME:
+                    _audio_ep.SetMasterVolumeLevelScalar(_DUCK_VOLUME, None)
         else:
-            if _mute_saved is not None and not _mute_saved:
-                _audio_ep.SetMute(0, None)
-            _mute_saved = None
+            if mode == "mute":
+                print(f"[Mute] ミュート解除 (復元: {_mute_saved})")
+                if _mute_saved is not None and not _mute_saved:
+                    _audio_ep.SetMute(0, None)
+                _mute_saved = None
+            elif mode == "duck":
+                print(f"[Mute] duck 解除 (復元: {_volume_saved})")
+                if _volume_saved is not None:
+                    _audio_ep.SetMasterVolumeLevelScalar(_volume_saved, None)
+                _volume_saved = None
     except Exception as e:
-        print(f"[Mute] ミュート操作失敗: {e}")
+        print(f"[Mute] 音量操作失敗: {e}")
 
 import config as _config
 from step1_recorder import Recorder
 from step2_transcriber import WhisperTranscriber
 from step3_refiner import LlamaRefiner
+
+def _build_transcriber(cfg: dict, llama_gate):
+    """
+    config の transcriber.backend に応じて WhisperTranscriber または
+    SenseVoiceTranscriber を生成して返す。
+    """
+    t_cfg   = cfg.get("transcriber", {})
+    backend = t_cfg.get("backend", "whisper")
+
+    if backend == "sensevoice":
+        from step2_sensevoice import SenseVoiceTranscriber
+        sv_dir = _config.resolve_dir(t_cfg.get("sensevoice_dir", ""), "sensevoice-onnx")
+        return SenseVoiceTranscriber(
+            model_dir=sv_dir,
+            language=t_cfg.get("language", "ja"),
+            startup_gate=llama_gate,
+        )
+
+    # デフォルト: whisper
+    whisper_cfg  = cfg["whisper"]
+    whisper_dir  = _config.resolve_dir(whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
+    whisper_port = _config.resolve_port(int(whisper_cfg["server_port"]))
+    model_key    = t_cfg.get("model_key", "kotoba-q5")
+    return WhisperTranscriber(
+        startup_gate=llama_gate,
+        whisper_dir=whisper_dir,
+        server_port=whisper_port,
+        model=model_key,
+    )
 from step4_paster import Paster
-from step5_gui import TrayIcon, SettingsWindow, HistoryWindow, DictWindow
-from updater import LlamaUpdater
+from step5_gui import (
+    TrayIcon, SettingsWindow, HistoryWindow, DictWindow,
+    VideoTranscribeWindow, FloatingButton, HomeWindow, AdvisorWindow,
+)
+from stats import Stats
 from personal_dict import PersonalDict
 
 
@@ -310,31 +367,32 @@ class AirType:
         self._root = root
 
         # 設定読み込み
-        _cfg         = _config.load()
-        _whisper_cfg = _cfg["whisper"]
-        _llama_cfg   = _cfg["llama"]
-        _whisper_dir = _config.resolve_dir(_whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
-        _llama_dir   = _config.resolve_dir(_llama_cfg["dir"],   "llama.cpp-windows-vulkan")
-        _whisper_port = _config.resolve_port(int(_whisper_cfg["server_port"]))
-        _llama_port   = _config.resolve_port(int(_llama_cfg["server_port"]))
+        _cfg       = _config.load()
+        _llama_cfg = _cfg["llama"]
+        _llama_dir  = _config.resolve_dir(_llama_cfg["dir"], "llama.cpp-windows-vulkan")
+        _llama_port = _config.resolve_port(int(_llama_cfg["server_port"]))
 
         # 各モジュール初期化
         # 起動順: refiner → transcriber の順で VRAM を優先確保させる
         # llama-server がサーバーモードの場合、その準備完了イベントをゲートとして渡す
-        # → whisper-server は llama-server のロード完了後に起動し VRAM 競合を回避する
         self.recorder = Recorder()
         self.refiner  = LlamaRefiner(llama_dir=_llama_dir, server_port=_llama_port)
-        _whisper_gate = self.refiner._server_ready if self.refiner._use_server else None
-        self.transcriber = WhisperTranscriber(
-            startup_gate=_whisper_gate,
-            whisper_dir=_whisper_dir,
-            server_port=_whisper_port,
-        )
+        _llama_gate   = self.refiner._server_ready if self.refiner._use_server else None
+        self.transcriber = _build_transcriber(_cfg, _llama_gate)
         self.paster = Paster()
         self.personal_dict = PersonalDict()
+        self._stats = Stats()
 
-        # Refiner 使用フラグ (設定画面から切り替え可能)
-        self.use_refiner = True
+        # Refiner 使用フラグ (設定画面から切り替え可能。config から初期値を読む)
+        self.use_refiner  = _cfg.get("refiner", {}).get("enabled", True)
+        self._duck_mode   = _cfg.get("audio_duck", {}).get("mode", "mute")
+        print(f"[Mute] 録音中音量調整モード: {self._duck_mode}  _audio_ep={_audio_ep is not None}")
+        # カスタムアイコンパス (トレイ・ショートカット別)
+        _ui_cfg = _cfg.get("ui", {})
+        self._custom_icon_path          = _ui_cfg.get("custom_icon_path", "")
+        self._custom_shortcut_icon_path = _ui_cfg.get("shortcut_icon_path", "")
+        # 最後の認識テキスト（フローティングボタンから再ペーストするために保持）
+        self._last_text   = ""
 
         # 状態管理
         self.state         = State.IDLE
@@ -365,17 +423,63 @@ class AirType:
         # 認識履歴 (どのスレッドからでも add() 可能)
         self._history = HistoryWindow(root, personal_dict=self.personal_dict)
 
-        # 設定ウィンドウ (モデル変更 + Refiner ON/OFF コールバック付き)
+        # 設定ウィンドウ (モデル変更 + Refiner ON/OFF + アイコン変更コールバック付き)
         self._settings = SettingsWindow(
             master=root,
             get_model=lambda: self.transcriber.model_key,
             on_apply=self._change_model,
             get_use_refiner=lambda: self.use_refiner,
             on_refiner_change=self._set_use_refiner,
+            get_icon_path=lambda: self._custom_icon_path,
+            on_icon_change=self._on_icon_change,
+            get_shortcut_icon_path=lambda: self._custom_shortcut_icon_path,
+            on_shortcut_icon_change=self._on_shortcut_icon_change,
+            get_backend=lambda: _cfg.get("transcriber", {}).get("backend", "whisper"),
+            on_backend_change=self._on_backend_change,
+            get_duck_mode=lambda: self._duck_mode,
+            on_duck_mode_change=self._on_duck_mode_change,
         )
 
         # 個人辞書ウィンドウ
         self._dict_win = DictWindow(root, self.personal_dict)
+
+        # 動画文字起こしウィンドウ
+        _whisper_dir = _config.resolve_dir(_cfg["whisper"]["dir"], "whisper.cpp-windows-vulkan")
+        self._video_win = VideoTranscribeWindow(
+            root, self.transcriber, personal_dict=self.personal_dict, cfg=_cfg,
+            get_backend=lambda: _cfg.get("transcriber", {}).get("backend", "whisper"),
+            whisper_cfg={
+                "dir":       str(_whisper_dir),
+                "model_key": _cfg.get("transcriber", {}).get("model_key", "kotoba-q5"),
+            },
+        )
+
+        # フローティングボタン
+        self._float_btn = FloatingButton(
+            master=root,
+            on_press_record=self._handle_ptt_press,
+            on_release_record=self._handle_ptt_release,
+            on_paste=self._handle_repaste,
+        )
+        if _cfg.get("ui", {}).get("floating_button", False):
+            self._float_btn.show()
+
+        # 最適設定ウィザード
+        self._advisor_win = AdvisorWindow(root, cfg=_cfg)
+
+        # ホームウィンドウ
+        self._home_win = HomeWindow(
+            master=root,
+            stats=self._stats,
+            on_settings=self._settings.show,
+            on_history=self._history.show,
+            on_dict=self._dict_win.show,
+            on_video=self._video_win.show,
+            on_advisor=self._advisor_win.show,
+            on_float_toggle=self._toggle_float_button,
+            get_float_visible=lambda: self._float_btn.visible,
+            on_quit=self.shutdown,
+        )
 
         # システムトレイアイコン
         self._tray = TrayIcon(
@@ -384,6 +488,11 @@ class AirType:
             on_history=self._history.show,
             on_quit=self.shutdown,
             on_dict=self._dict_win.show,
+            on_video_transcribe=self._video_win.show,
+            on_float_toggle=self._toggle_float_button,
+            get_float_visible=lambda: self._float_btn.visible,
+            icon_path=self._custom_icon_path,
+            on_home=self._home_win.show,
         )
 
         # ── API サーバー (クライアントPCからのリモート受付) ──────────
@@ -393,7 +502,7 @@ class AirType:
             self._start_api_server(_net_cfg)
 
         # UI ポーリング開始 (50ms ごと)
-        self._root.after(50, self._poll_ui_queue)
+        self._root.after(10, self._poll_ui_queue)
 
         print("\n" + "=" * 50)
         print("  AirType 起動完了")
@@ -402,75 +511,6 @@ class AirType:
             print(f"  API サーバー: http://{_net_cfg['host']}:{_net_cfg['port']}/dictate")
         print("  終了: トレイアイコン右クリック → 終了")
         print("=" * 50 + "\n")
-
-        # 起動後にバックグラウンドで llama.cpp の更新チェック（起動をブロックしない）
-        self._llama_dir_for_update = _llama_dir
-        threading.Thread(
-            target=self._check_for_update,
-            daemon=True,
-            name="LlamaUpdateCheck",
-        ).start()
-
-    # ── llama.cpp 更新チェック ──────────────────────────────────────────
-    def _check_for_update(self):
-        """バックグラウンドで llama.cpp の更新を確認し、あればメインスレッドに通知する。"""
-        updater = LlamaUpdater(self._llama_dir_for_update)
-        info = updater.check_update()
-        if info is None:
-            return
-        # tkinter 操作はメインスレッドで行う
-        self._root.after(0, lambda: self._prompt_update(updater, info))
-
-    def _prompt_update(self, updater: "LlamaUpdater", info: dict):
-        """更新確認ダイアログを表示し、承認されたらダウンロード・差し替えを行う。"""
-        from tkinter import messagebox
-        msg = (
-            f"llama.cpp の新しいバージョンがあります。\n\n"
-            f"現在: b{info['local_build']}\n"
-            f"最新: {info['tag']}\n\n"
-            f"ダウンロードしてアップデートしますか？\n"
-            f"（アップデート中は音声認識が一時停止します）"
-        )
-        if not messagebox.askyesno("AirType アップデート", msg):
-            return
-        threading.Thread(
-            target=self._do_update,
-            args=(updater, info),
-            daemon=True,
-            name="LlamaUpdate",
-        ).start()
-
-    def _do_update(self, updater: "LlamaUpdater", info: dict):
-        """llama-server を停止 → ファイル差し替え → 再起動する。"""
-        from tkinter import messagebox
-
-        # llama-server 停止
-        self.refiner.shutdown()
-
-        def _show_progress(downloaded, total):
-            mb = downloaded // 1024 // 1024
-            if total:
-                pct = downloaded * 100 // total
-                print(f"[Updater] ダウンロード中: {mb} MB ({pct}%)", end="\r")
-            else:
-                print(f"[Updater] ダウンロード中: {mb} MB", end="\r")
-
-        success = updater.download_and_apply(info["asset_url"], on_progress=_show_progress)
-        print()  # 改行
-
-        if success:
-            self._root.after(0, lambda: messagebox.showinfo(
-                "AirType",
-                f"llama.cpp を {info['tag']} にアップデートしました。\nllama-server を再起動します。",
-            ))
-            self.refiner.restart_server()
-        else:
-            self._root.after(0, lambda: messagebox.showerror(
-                "AirType",
-                "アップデートに失敗しました。\n手動でアップデートしてください。",
-            ))
-            # 失敗時も llama-server を再起動して通常動作に戻す
-            self.refiner.restart_server()
 
     # ── PTT イベント (PttHook スレッドから呼ばれる) ─────────────────────
     def _handle_ptt_press(self):
@@ -485,10 +525,12 @@ class AirType:
             self.state = State.RECORDING
         self._log_state("IDLE → RECORDING")
 
-        _mute_system(True)
+        self._stats.recording_started()
+        _mute_system(True, self._duck_mode)
         self.recorder.start()
         self._ui_queue.put("show")
         self._ui_queue.put("tray_rec")
+        self._ui_queue.put("float_rec")
 
     def _handle_ptt_release(self):
         if not self._ptt_key_down:
@@ -501,7 +543,9 @@ class AirType:
             self.state = State.IDLE
         self._log_state("RECORDING → IDLE (WAV をキューに投入)")
 
-        _mute_system(False)
+        self._stats.recording_stopped()
+
+        _mute_system(False, self._duck_mode)
         self._ui_queue.put("hide")
         self._ui_queue.put("tray_idle")
 
@@ -514,7 +558,7 @@ class AirType:
 
     # ── UI ポーリング (メインスレッド) ─────────────────────────────────
     def _poll_ui_queue(self):
-        """50ms ごとに UI キューを消化して OSD・トレイ・履歴を更新する"""
+        """50ms ごとに UI キューを消化して OSD・トレイ・履歴・フローティングボタンを更新する"""
         try:
             while True:
                 cmd = self._ui_queue.get_nowait()
@@ -526,11 +570,17 @@ class AirType:
                     self._tray.set_recording(True)
                 elif cmd == "tray_idle":
                     self._tray.set_recording(False)
+                elif cmd == "float_rec":
+                    self._float_btn.set_recording()
+                elif cmd == "float_idle":
+                    self._float_btn.set_idle()
+                elif isinstance(cmd, tuple) and cmd[0] == "float_done":
+                    self._float_btn.set_done(cmd[1])
                 elif isinstance(cmd, tuple) and cmd[0] == "add_history":
                     self._history.add(cmd[1])
         except queue.Empty:
             pass
-        self._root.after(50, self._poll_ui_queue)
+        self._root.after(10, self._poll_ui_queue)
 
     # ── 録音停止 & WAV キュー投入 ──────────────────────────────────────
     def _stop_and_enqueue(self):
@@ -565,6 +615,7 @@ class AirType:
             raw_text = self.transcriber.transcribe(wav_path)
             if not raw_text.strip():
                 print("[AirType] 音声が認識されませんでした")
+                self._ui_queue.put("float_idle")
                 return
 
             # 2. テキスト整形 (use_refiner が False なら Whisper 結果をそのまま使用)
@@ -586,11 +637,21 @@ class AirType:
             self.paster.paste(refined_text)
             print(f"\n[AirType] 完了: {refined_text!r}\n")
 
-            # 5. 認識履歴に追加 (Worker スレッドから安全に呼べる)
+            # 5. 最後のテキストを保持（フローティングボタンからの再ペースト用）
+            self._last_text = refined_text
+
+            # 6. 統計に単語数を記録
+            self._stats.text_added(refined_text)
+
+            # 7. フローティングボタンを「ペースト可」状態に
+            self._ui_queue.put(("float_done", refined_text))
+
+            # 8. 認識履歴に追加 (Worker スレッドから安全に呼べる)
             self._ui_queue.put(("add_history", refined_text))
 
         except Exception as e:
             print(f"[AirType] パイプラインエラー: {e}")
+            self._ui_queue.put("float_idle")
 
         finally:
             if wav_path and wav_path.exists():
@@ -612,14 +673,67 @@ class AirType:
         except Exception:
             pass
 
+    def _handle_repaste(self):
+        """フローティングボタンの done 状態クリック時: 最後のテキストを再ペースト。
+        WS_EX_NOACTIVATE によりボタンクリック時のフォーカスは移動しないため、
+        ペーストは直前にアクティブだったウィンドウへ届く。
+        """
+        if not self._last_text:
+            return
+        text = self._last_text
+        self._ui_queue.put("float_idle")
+        threading.Thread(
+            target=self.paster.paste,
+            args=(text,),
+            daemon=True,
+            name="Repaste",
+        ).start()
+
+    def _toggle_float_button(self):
+        """トレイメニューからフローティングボタンの表示を切り替える。"""
+        self._float_btn.toggle()
+
     def _set_use_refiner(self, enabled: bool):
         """Refiner の使用有無を切り替える（設定ウィンドウから呼ばれる）"""
         self.use_refiner = enabled
         state_str = "ON" if enabled else "OFF"
         print(f"[AirType] LLM テキスト整形: {state_str}")
 
+    def _on_icon_change(self, path_str: str):
+        """トレイアイコンを変更し、設定を保存してトレイアイコンを即時更新する。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("ui", "custom_icon_path", path_str)
+        self._custom_icon_path = path_str
+        self._tray.update_icon(path_str)
+
+    def _on_shortcut_icon_change(self, path_str: str):
+        """ショートカットアイコンパスを保存する（適用はボタン押下時に別途実行）。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("ui", "shortcut_icon_path", path_str)
+        self._custom_shortcut_icon_path = path_str
+
+    def _on_backend_change(self, backend: str):
+        """音声認識バックエンドを設定に保存する（次回起動時に有効）。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("transcriber", "backend", backend)
+        print(f"[AirType] バックエンド変更を保存: {backend} (次回起動時に有効)")
+
+    def _on_duck_mode_change(self, mode: str):
+        """録音中の音量調整モードを変更する（即時反映）。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("audio_duck", "mode", mode)
+        self._duck_mode = mode
+        labels = {"mute": "ミュート", "duck": "音量を下げる", "off": "無効"}
+        print(f"[AirType] 録音中音量調整: {labels.get(mode, mode)}")
+
     def _change_model(self, model_key: str):
-        """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）"""
+        """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）。
+        SenseVoice バックエンド使用時は Whisper モデル変更は不要なため何もしない。
+        """
+        if not isinstance(self.transcriber, WhisperTranscriber):
+            print(f"[AirType] SenseVoice バックエンド使用中のためモデル変更をスキップ: {model_key}")
+            return
+
         def _do_change():
             try:
                 print(f"[AirType] モデルを変更中: {model_key}")

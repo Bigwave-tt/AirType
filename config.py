@@ -35,6 +35,29 @@ _DEFAULTS: dict = {
         "dir":         "",      # 空文字 = デフォルト相対パスを使用
         "server_port": 18765,   # 0 = 空きポートを自動割り当て
     },
+    "ui": {
+        "floating_button":      False,  # True = 起動時にフローティングボタンを表示
+        "custom_icon_path":     "",     # トレイアイコン画像のパス (空文字 = デフォルト)
+        "shortcut_icon_path":   "",     # デスクトップショートカットアイコンのパス
+    },
+    "transcriber": {
+        "backend":        "whisper",    # "whisper" | "sensevoice"
+        "sensevoice_dir": "",           # 空文字 = 親フォルダ/sensevoice-onnx
+        "language":       "ja",
+        "model_key":      "kotoba-q5",  # Whisper バックエンド使用時のモデルキー
+    },
+    "refiner": {
+        "enabled": True,  # False = LLM整形をスキップしてルールベースのみ使用
+    },
+    "audio_duck": {
+        "mode": "duck",  # "mute" | "duck" | "off"
+    },
+    "video": {
+        "backend":              "whisper",  # "whisper" | "sensevoice" — 動画文字起こし専用バックエンド
+        "chunk_sec_whisper":    300,        # Whisper のチャンク長 (秒)
+        "chunk_sec_sensevoice": 30,         # SenseVoice のチャンク長 (秒)
+        "max_duration_sec":     1800,       # この秒数を超えると警告ダイアログを表示
+    },
 }
 
 
@@ -85,6 +108,25 @@ def resolve_port(configured: int) -> int:
         print(f"[Config] ポート自動割り当て: {port}")
         return port
     return configured
+
+
+def save_value(section: str, key: str, value) -> bool:
+    """airtype_config.json の section.key だけを上書き保存する。"""
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            pass
+    cfg.setdefault(section, {})[key] = value
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[Config] 保存失敗: {e}")
+        return False
 
 
 def resolve_dir(configured: str, default_subdir: str) -> Path:

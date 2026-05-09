@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# ランタイム生成ファイル
+airtype.log
+airtype_stats.json
+airtype_dict.json
+custom_icon.ico
+
+# Claude Code
+.claude/
+
+# 重複ディレクトリ
+AirType/

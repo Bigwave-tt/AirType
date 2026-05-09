@@ -29,6 +29,7 @@ RuleBasedRefiner: 正規表現によるフィラー除去 [フォールバック
       google_gemma-4-E4B-it-Q8_0.gguf    ← Gemma 4 高精度 (約4GB)
 """
 
+import atexit
 import difflib
 import json
 import re
@@ -281,6 +282,7 @@ class LlamaRefiner:
                 )
                 self._server_ready.set()
                 self._attached_to_existing = True
+                atexit.register(self.shutdown)   # 孤児プロセスを確実に片付ける
                 return
 
             print(f"[Refiner] LLM整形: {model_path.name} (サーバーモード, ポート {self._server_port})")
@@ -290,6 +292,7 @@ class LlamaRefiner:
                 daemon=True,
                 name="LlamaServer",
             ).start()
+            atexit.register(self.shutdown)   # 万一 shutdown() が呼ばれなくても片付ける
             return
 
         # ── CLI サブプロセスモード（フォールバック）──────────────────
@@ -388,20 +391,49 @@ class LlamaRefiner:
             return False
 
     def shutdown(self):
-        """サーバープロセスを終了する（アプリ終了時に呼ぶ）。"""
-        if self._attached_to_existing:
-            # 外部プロセスは終了させない
-            print("[Refiner] 共有モードのため llama-server の終了をスキップします")
+        """サーバープロセスを終了する（アプリ終了時に呼ぶ）。二重呼び出し安全。"""
+        if getattr(self, "_shutdown_done", False):
             return
-        if self._server_proc and self._server_proc.poll() is None:
-            print("[Refiner] llama-server 終了中...")
-            self._server_proc.terminate()
-            try:
-                self._server_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._server_proc.kill()
-            print("[Refiner] llama-server 終了しました")
-        self._server_proc = None
+        self._shutdown_done = True
+
+        if self._server_proc is not None:
+            # 自分で起動したサーバーを terminate で終了
+            if self._server_proc.poll() is None:
+                print("[Refiner] llama-server 終了中...")
+                self._server_proc.terminate()
+                try:
+                    self._server_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._server_proc.kill()
+                print("[Refiner] llama-server 終了しました")
+            self._server_proc = None
+
+        elif self._use_server:
+            # 共有モードでアタッチしていた場合も終了する。
+            # AirType は二重起動防止済みなので、このポートで動いているのは
+            # 前回実行で残った孤児プロセスとみなして安全に終了できる。
+            self._kill_on_port(self._server_port)
+
+    def _kill_on_port(self, port: int) -> None:
+        """指定ポートで LISTEN しているプロセスを taskkill で終了する (Windows)。"""
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                # 例: "  TCP  127.0.0.1:18765  0.0.0.0:0  LISTENING  1234"
+                if f":{port} " in line and "LISTENING" in line:
+                    pid = int(line.split()[-1])
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=5,
+                    )
+                    print(f"[Refiner] 孤児 llama-server (PID {pid}) を終了しました")
+                    return
+            print(f"[Refiner] ポート {port} に LISTENING プロセスが見つかりませんでした")
+        except Exception as e:
+            print(f"[Refiner] ポート {port} のプロセス終了失敗: {e}")
 
     def restart_server(self):
         """llama-server を停止してから再起動する（アップデート後に呼ぶ）。"""

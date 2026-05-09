@@ -25,8 +25,8 @@
     "server_port": 18765
   },
   "ui": {
-    "custom_icon_path": "C:/Users/t-tak/OneDrive/Downloads/DesktopIcon.png",
-    "shortcut_icon_path": "C:/Users/t-tak/OneDrive/Downloads/DesktopIcon.png"
+    "custom_icon_path": "C:/Users/t-tak/OneDrive/Documents/Claude/AirType/AirType/AirTypeTrayIcon.png",
+    "shortcut_icon_path": "C:/Users/t-tak/OneDrive/Documents/Claude/AirType/AirType/AirTypeIcon.png"
   },
   "transcriber": {
     "_comment_backend": "使用する STT バックエンド。\"whisper\" または \"sensevoice\"",

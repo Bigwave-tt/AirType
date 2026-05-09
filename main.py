@@ -41,11 +41,12 @@ except Exception:
 def _get_audio_endpoint():
     """デフォルト出力デバイスの EndpointVolume を返す。失敗時は None。"""
     if not _PYCAW_AVAILABLE:
+        print("[Mute] pycaw が見つかりません。pip install pycaw で導入してください。")
         return None
     try:
         return AudioUtilities.GetSpeakers().EndpointVolume
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"[Mute] AudioEndpoint 取得失敗: {e}")
 
 
 _audio_ep = _get_audio_endpoint()          # 起動時に一度だけ取得
@@ -62,24 +63,31 @@ def _mute_system(mute: bool, mode: str = "mute") -> None:
     mode="off"  : 何もしない
     """
     global _mute_saved, _volume_saved
-    if _audio_ep is None or mode == "off":
+    if mode == "off":
+        return
+    if _audio_ep is None:
+        print("[Mute] _audio_ep が None のためスキップ (pycaw 未インストール?)")
         return
     try:
         if mute:
             if mode == "mute":
                 _mute_saved = bool(_audio_ep.GetMute())
+                print(f"[Mute] ミュート開始 (元のミュート状態: {_mute_saved})")
                 if not _mute_saved:
                     _audio_ep.SetMute(1, None)
             elif mode == "duck":
                 _volume_saved = _audio_ep.GetMasterVolumeLevelScalar()
+                print(f"[Mute] duck 開始 (現在音量: {_volume_saved:.2f} → {_DUCK_VOLUME:.2f})")
                 if _volume_saved > _DUCK_VOLUME:
                     _audio_ep.SetMasterVolumeLevelScalar(_DUCK_VOLUME, None)
         else:
             if mode == "mute":
+                print(f"[Mute] ミュート解除 (復元: {_mute_saved})")
                 if _mute_saved is not None and not _mute_saved:
                     _audio_ep.SetMute(0, None)
                 _mute_saved = None
             elif mode == "duck":
+                print(f"[Mute] duck 解除 (復元: {_volume_saved})")
                 if _volume_saved is not None:
                     _audio_ep.SetMasterVolumeLevelScalar(_volume_saved, None)
                 _volume_saved = None
@@ -378,6 +386,7 @@ class AirType:
         # Refiner 使用フラグ (設定画面から切り替え可能。config から初期値を読む)
         self.use_refiner  = _cfg.get("refiner", {}).get("enabled", True)
         self._duck_mode   = _cfg.get("audio_duck", {}).get("mode", "mute")
+        print(f"[Mute] 録音中音量調整モード: {self._duck_mode}  _audio_ep={_audio_ep is not None}")
         # カスタムアイコンパス (トレイ・ショートカット別)
         _ui_cfg = _cfg.get("ui", {})
         self._custom_icon_path          = _ui_cfg.get("custom_icon_path", "")

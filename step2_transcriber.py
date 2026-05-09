@@ -64,11 +64,11 @@ MODELS = {k: WHISPER_DIR / v for k, v in _MODEL_FILES.items()}
 
 DEFAULT_MODEL = "kotoba-q5"
 
-# モデル別タイムアウト (秒) - CLIモード用 (モデルロード込み)
-# kotoba は軽量なので 30 秒で十分; large 系は 120 秒
+# モデル別タイムアウト (秒) - CLIモード用の基準値 (モデルロード込み)
+# 長い録音では _get_wav_duration() を元に動的に延長される
 MODEL_TIMEOUTS = {
-    "kotoba-q5":   30,
-    "kotoba-full": 45,
+    "kotoba-q5":   60,   # 30→60: 長めの発話でも確実に処理できるよう余裕を持たせる
+    "kotoba-full": 90,
 }
 
 DEFAULT_LANGUAGE = "ja"
@@ -81,7 +81,11 @@ INITIAL_PROMPT = "日本語の音声入力です。"
 # サーバーモード設定
 _DEFAULT_WHISPER_SERVER_PORT = 18766  # デフォルトポート (config で上書き可)
 _STARTUP_TIMEOUT             = 60     # サーバー起動・モデルロード完了までの待機上限 (秒)
-_INFER_TIMEOUT               = 30     # サーバーモードの推論タイムアウト (秒)
+_INFER_TIMEOUT               = 60     # サーバーモードの推論タイムアウト (秒)
+
+# whisper-server は長尺音声を先頭の数十秒だけ処理する場合があるため、
+# この秒数を超える録音は自動的に CLI モードへ切り替える。
+_SERVER_MAX_DURATION_SEC = 20.0
 
 # タイムスタンプ付き出力行のパターン: [00:00:00.000 --> 00:00:02.860]  テキスト (CLIモード用)
 _TIMESTAMP_RE = re.compile(r"^\[[\d:.]+ --> [\d:.]+\]\s*(.*)")
@@ -102,6 +106,20 @@ _NOISE_RE = re.compile(
     r"|^チャンネル登録をお願いします[。！]?$"
     r"|^字幕[はを].*提供しています[。]?$"
 )
+
+
+# ─────────────────────────────────────
+# ユーティリティ
+# ─────────────────────────────────────
+
+def _get_wav_duration(wav_path: Path) -> float:
+    """WAV ファイルの再生時間 (秒) を返す。読み取り失敗時は 0.0。"""
+    try:
+        import wave as _wave
+        with _wave.open(str(wav_path), "rb") as wf:
+            return wf.getnframes() / float(wf.getframerate())
+    except Exception:
+        return 0.0
 
 
 # ─────────────────────────────────────
@@ -130,6 +148,7 @@ class WhisperTranscriber:
         startup_gate: Optional[threading.Event] = None,
         whisper_dir: Optional[Path] = None,
         server_port: Optional[int] = None,
+        cli_only: bool = False,
     ):
         """
         Parameters
@@ -189,7 +208,7 @@ class WhisperTranscriber:
             )
 
         # ── サーバーモード優先 ────────────────────────────────────────
-        if self._whisper_server.exists():
+        if self._whisper_server.exists() and not cli_only:
             self._use_server = True
             print(f"[Transcriber] whisper-server.exe: {self._whisper_server}")
             print(f"[Transcriber] モデル: {self.model_path.name}")
@@ -296,6 +315,22 @@ class WhisperTranscriber:
 
         print(f"[Transcriber] 文字起こし開始: {wav_path.name}")
         self._check_audio_level(wav_path)
+
+        # ── 長尺録音の自動 CLI 切り替え ────────────────────────────────
+        # whisper-server の HTTP API は長尺音声を先頭の数十秒だけ処理する場合があるため、
+        # _SERVER_MAX_DURATION_SEC を超える録音は CLI モードで確実に全文を処理する。
+        # タイムアウトも音声長に比例して延長する (処理時間 ≒ 音声長 × 1.5 を上限の目安に)。
+        if not force_cli and self._use_server:
+            duration = _get_wav_duration(wav_path)
+            if duration > _SERVER_MAX_DURATION_SEC:
+                print(
+                    f"[Transcriber] 長い録音 ({duration:.1f}s > {_SERVER_MAX_DURATION_SEC}s) "
+                    f"のため CLI モードに切り替え"
+                )
+                force_cli = True
+                if infer_timeout is None:
+                    infer_timeout = max(self.timeout, int(duration * 1.5) + 10)
+                    print(f"[Transcriber] タイムアウトを {infer_timeout}s に設定")
 
         t0 = time.perf_counter()
         if self._use_server and not force_cli:

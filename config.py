@@ -41,9 +41,22 @@ _DEFAULTS: dict = {
         "shortcut_icon_path":   "",     # デスクトップショートカットアイコンのパス
     },
     "transcriber": {
-        "backend":        "whisper",  # "whisper" | "sensevoice"
-        "sensevoice_dir": "",         # 空文字 = 親フォルダ/sensevoice-onnx
+        "backend":        "whisper",    # "whisper" | "sensevoice"
+        "sensevoice_dir": "",           # 空文字 = 親フォルダ/sensevoice-onnx
         "language":       "ja",
+        "model_key":      "kotoba-q5",  # Whisper バックエンド使用時のモデルキー
+    },
+    "refiner": {
+        "enabled": True,  # False = LLM整形をスキップしてルールベースのみ使用
+    },
+    "audio_duck": {
+        "mode": "duck",  # "mute" | "duck" | "off"
+    },
+    "video": {
+        "backend":              "whisper",  # "whisper" | "sensevoice" — 動画文字起こし専用バックエンド
+        "chunk_sec_whisper":    300,        # Whisper のチャンク長 (秒)
+        "chunk_sec_sensevoice": 30,         # SenseVoice のチャンク長 (秒)
+        "max_duration_sec":     1800,       # この秒数を超えると警告ダイアログを表示
     },
 }
 

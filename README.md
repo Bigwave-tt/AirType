@@ -9,13 +9,13 @@ Windows 向けプッシュトゥトーク（PTT）音声入力ツール。
 
 ## 特徴
 
-- **プッシュトゥトーク** — 「無変換」キーを押している間だけ録音。誤認識を防ぐシンプルな操作
-- **高精度日本語STT** — [whisper.cpp](https://github.com/ggerganov/whisper.cpp)（Vulkan GPU加速）で文字起こし
-- **LLMによるテキスト整形** — [llama.cpp](https://github.com/ggerganov/llama.cpp)がフィラー除去・句読点付与を行う（オプション）
-- **常駐サーバー方式** — 初回起動後はモデルがVRAMに常駐し、低レイテンシで応答
-- **OSD表示** — 録音中に半透明のインジケーターをオーバーレイ表示
-- **システムトレイ常駐** — 右クリックメニューから設定・履歴・終了を操作
-- **ネットワークモード** — GPU非搭載PCからGPU搭載PCに音声を転送して処理（2台構成）
+- **プッシュトゥトーク** — 「無変換」キーを押している間だけ録音。意図しない認識が起きない
+- **AMD Vulkan 対応** — NVIDIA 不要。AMD GPU（RX 6600 等）で GPU 加速が動く数少ないツール
+- **日本語特化 STT** — kotoba-whisper（日本語ファインチューン済み whisper）で高精度認識
+- **LLM によるテキスト整形** — フィラー除去・句読点付与をローカル LLM が行う（オプション）
+- **常駐サーバー方式** — 初回起動後はモデルが VRAM に常駐し、毎回起動コストなし
+- **OSD 表示** — 録音中に半透明インジケーターをオーバーレイ表示
+- **2台構成対応** — GPU 非搭載 PC からネットワーク越しに GPU PC へ音声を送信して処理
 
 ---
 
@@ -23,166 +23,178 @@ Windows 向けプッシュトゥトーク（PTT）音声入力ツール。
 
 | 項目 | 要件 |
 |------|------|
-| OS | Windows 10/11 (64bit) |
+| OS | Windows 10 / 11 (64bit) |
 | Python | 3.10 以上 |
 | GPU | Vulkan 対応 GPU（AMD RX 6600 等） |
-| VRAM | 8 GB 推奨 |
+| VRAM | 8 GB 推奨（LLM 整形使用時） |
 | RAM | 16 GB 以上推奨 |
-
-### 外部バイナリ
-
-AirType リポジトリの **親フォルダ** に配置してください。
-
-```
-親フォルダ/
-├── AirType/                        ← このリポジトリ
-├── whisper.cpp-windows-vulkan/
-│   ├── whisper-server.exe
-│   ├── whisper-cli.exe
-│   ├── ggml-kotoba-whisper-v2.0-q5_0.bin   (~538 MB, デフォルト)
-│   └── ggml-vulkan.dll
-└── llama.cpp-windows-vulkan/
-    ├── llama-server.exe
-    ├── llama-cli.exe
-    └── Qwen3.5-2B-Q5_K_M.gguf              (~1.7 GB, デフォルト)
-```
-
-- **whisper.cpp** — [whisper.cpp リリース](https://github.com/ggerganov/whisper.cpp/releases) から `vulkan` ビルドを取得
-- **kotoba-whisper モデル** — [ggml-kotoba-whisper-v2.0](https://huggingface.co/ggml-org/kotoba-whisper-v2.0-gguf) (Hugging Face)
-- **llama.cpp** — [llama.cpp リリース](https://github.com/ggerganov/llama.cpp/releases) から `vulkan` ビルドを取得
-- **Qwen3.5-2B モデル** — [Qwen3.5-2B GGUF](https://huggingface.co/bartowski/Qwen3.5-2B-Instruct-GGUF) (Hugging Face)
 
 ---
 
 ## セットアップ
 
-### 1. Python 依存パッケージのインストール
+AirType 本体のほかに、**whisper.cpp**（音声認識）と **llama.cpp**（テキスト整形）のバイナリ・モデルが必要です。以下の手順で揃えてください。
+
+### 手順 1 — フォルダ構成を作る
+
+AirType リポジトリの **親フォルダ** に、次の並びでフォルダを配置します。
+
+```
+どこか作業フォルダ/
+├── AirType/                         ← このリポジトリ（git clone 先）
+├── whisper.cpp-windows-vulkan/      ← 手順 2 で作成
+└── llama.cpp-windows-vulkan/        ← 手順 3 で作成（LLM 整形を使う場合）
+```
+
+### 手順 2 — whisper.cpp を用意する
+
+#### 2-1. バイナリを取得
+
+1. [whisper.cpp Releases](https://github.com/ggerganov/whisper.cpp/releases) を開く
+2. 最新リリースの Assets から **`whisper-...-windows-vulkan.zip`** をダウンロード
+3. 展開して中身を `whisper.cpp-windows-vulkan/` フォルダに置く
+   - `whisper-server.exe` と `whisper-cli.exe` が含まれていれば OK
+
+#### 2-2. 音声認識モデルを取得
+
+HuggingFace から GGUF 形式のモデルをダウンロードして `whisper.cpp-windows-vulkan/` に置きます。
+
+| モデル | ファイル名 | サイズ | 推奨 |
+|--------|-----------|--------|------|
+| kotoba-whisper v2.0 Q5（日本語特化） | `ggml-kotoba-whisper-v2.0-q5_0.bin` | 約 540 MB | ★ デフォルト |
+| kotoba-whisper v2.0 フル精度 | `ggml-kotoba-whisper-v2.0.bin` | 約 1.5 GB | 最高精度 |
+
+ダウンロード先：[ggml-org/kotoba-whisper-v2.0-gguf（Hugging Face）](https://huggingface.co/ggml-org/kotoba-whisper-v2.0-gguf/tree/main)
+
+> ページ上部の「Files and versions」タブを開き、該当ファイルの右側にある ↓ アイコンからダウンロードできます。
+
+**この時点でのフォルダ構成:**
+```
+whisper.cpp-windows-vulkan/
+├── whisper-server.exe
+├── whisper-cli.exe
+├── ggml-kotoba-whisper-v2.0-q5_0.bin   ← ここに置く
+└── ggml-vulkan.dll（等）
+```
+
+### 手順 3 — llama.cpp を用意する（LLM 整形を使う場合）
+
+LLM によるフィラー除去・句読点付与を使わない場合はスキップできます。
+
+#### 3-1. バイナリを取得
+
+1. [llama.cpp Releases](https://github.com/ggerganov/llama.cpp/releases) を開く
+2. 最新リリースの Assets から **`llama-...-bin-win-vulkan-x64.zip`** をダウンロード
+3. 展開して中身を `llama.cpp-windows-vulkan/` フォルダに置く
+   - `llama-server.exe` と `llama-cli.exe` が含まれていれば OK
+
+#### 3-2. LLM モデルを取得
+
+| モデル | ファイル名 | サイズ | 推奨 |
+|--------|-----------|--------|------|
+| Qwen3.5-2B Q5_K_M | `Qwen3.5-2B-Q5_K_M.gguf` | 約 1.7 GB | ★ デフォルト（速度重視） |
+| Qwen3.5-4B Q5_K_M | `Qwen3.5-4B-Q5_K_M.gguf` | 約 2.7 GB | 精度重視 |
+
+ダウンロード先：[bartowski/Qwen3.5-2B-Instruct-GGUF（Hugging Face）](https://huggingface.co/bartowski/Qwen3.5-2B-Instruct-GGUF/tree/main)
+
+**この時点でのフォルダ構成:**
+```
+llama.cpp-windows-vulkan/
+├── llama-server.exe
+├── llama-cli.exe
+├── Qwen3.5-2B-Q5_K_M.gguf              ← ここに置く
+└── （各種 .dll）
+```
+
+### 手順 4 — Python パッケージをインストール
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`requirements.txt` の主な依存パッケージ:
-
-| パッケージ | 用途 |
-|-----------|------|
-| pynput | グローバルホットキー・キーボード制御 |
-| sounddevice | マイク録音 |
-| numpy | 録音バッファ処理 |
-| pyperclip | クリップボード操作 |
-| pystray | システムトレイアイコン |
-| Pillow | アイコン画像生成 |
-
-### 2. 設定ファイルの確認
-
-`airtype_config.json` を開き、必要に応じて変更します。
-
-```json
-{
-  "network": {
-    "server_url": "http://YOUR_SERVER_IP:8000/dictate"
-  },
-  "transcriber": {
-    "backend": "sensevoice",
-    "language": "ja"
-  }
-}
-```
-
-ネットワークモードを使わない場合、`network` セクションの変更は不要です。
-
-### 3. 起動
+### 手順 5 — 起動
 
 ```bash
-# コンソールあり（開発・デバッグ用）
 python main.py
 ```
 
-通常使用は `AirType_launcher.vbs` をダブルクリック（コンソールなし、バックグラウンド起動）。
+または `AirType_launcher.vbs` をダブルクリック（コンソールなし・バックグラウンド起動）。
+
+初回起動時は llama-server → whisper-server の順でモデルを VRAM に読み込みます。  
+GPU・モデルサイズによりますが、**起動完了まで 30〜90 秒**かかります。トレイアイコンが表示されたら準備完了です。
 
 ---
 
 ## 使い方
 
-1. `main.py` または `AirType_launcher.vbs` を起動するとシステムトレイにアイコンが表示される
-2. **「無変換」キーを押し続けながら** 話す（OSDインジケーターが赤く表示される）
-3. キーを **離す** と音声認識・テキスト整形が実行される
-4. 認識結果がアクティブウィンドウにペーストされる
+1. 起動するとタスクバーのシステムトレイにアイコンが表示される
+2. テキストを入力したいアプリ（メモ帳・ブラウザ等）をアクティブにする
+3. **「無変換」キーを押しながら** 話す（画面中央に赤い録音インジケーターが表示される）
+4. 話し終えたら **キーを離す**
+5. 数秒後に認識結果がカーソル位置にペーストされる
 
 ### トレイアイコンの操作
 
-右クリックメニューから以下を操作できます：
+右クリックメニューから操作できます：
 
-- **設定** — STTバックエンドやLLMモデルの変更
-- **履歴** — 認識テキストの履歴閲覧・コピー
-- **終了** — アプリケーションを終了
+| メニュー項目 | 内容 |
+|------------|------|
+| 設定 | STT バックエンド・LLM モデルの切り替え、LLM 整形の ON/OFF |
+| 履歴 | 認識テキストの一覧表示・コピー |
+| 終了 | アプリを終了（サーバープロセスも停止） |
+
+---
+
+## 設定ファイル
+
+`airtype_config.json` で動作をカスタマイズできます。よく使う項目：
+
+```json
+{
+  "transcriber": {
+    "backend": "sensevoice",   // "whisper" または "sensevoice"
+    "language": "ja"
+  },
+  "audio_duck": {
+    "mode": "duck"             // 録音中のシステム音量制御: "duck" / "mute" / "none"
+  }
+}
+```
+
+個人設定は `airtype_config.local.json` に書くとリポジトリに含まれません（`.gitignore` 済み）。
 
 ---
 
 ## ネットワークモード（2台構成）
 
-GPU非搭載のPCから、GPU搭載のPCにマイク音声を送信して処理する構成です。
+GPU 非搭載の PC（ノート PC 等）から、GPU 搭載 PC に音声を転送して処理する構成です。
 
-**ホストPC（GPU搭載）で起動:**
+**ホスト PC（GPU 搭載）で起動:**
 ```bash
 python api_server.py
 ```
 
-**クライアントPC で起動:**
+**クライアント PC で起動:**
 ```bash
 python client.py
-# または
-client_launcher.vbs をダブルクリック
+# または client_launcher.vbs をダブルクリック
 ```
 
-**`airtype_config.json` の設定:**
+`airtype_config.json` の `network.server_url` をホスト PC の IP アドレスに変更してください：
 ```json
-"network": {
-    "server_url": "http://YOUR_SERVER_IP:8000/dictate",
-    "host":       "0.0.0.0",
-    "port":       8000,
-    "api_key":    ""
-}
+"server_url": "http://192.168.x.x:8000/dictate"
 ```
-
-`YOUR_SERVER_IP` をホストPCのIPアドレスに変更してください。
 
 ---
 
-## STTバックエンドの選択
+## STT バックエンドの選択
 
-`airtype_config.json` の `transcriber.backend` で切り替えます。
+| バックエンド | 設定値 | 特徴 |
+|------------|--------|------|
+| whisper.cpp | `"whisper"` | Vulkan GPU 加速、多言語対応 |
+| SenseVoice Small (ONNX) | `"sensevoice"` | 高速・軽量、日本語特化、DirectML 加速 |
 
-| バックエンド | 値 | 説明 |
-|------------|-----|------|
-| whisper.cpp（デフォルト） | `"whisper"` | Vulkan GPU加速、英語・多言語対応 |
-| SenseVoice Small（ONNX） | `"sensevoice"` | 高速、日本語特化、DirectML加速 |
-
-SenseVoice を使う場合は `sensevoice-onnx` フォルダを親ディレクトリに配置してください。
-
----
-
-## フォルダ構成
-
-```
-AirType/
-├── main.py               メインスクリプト（シングルPCモード）
-├── api_server.py         APIサーバー（ネットワークモード・ホストPC用）
-├── client.py             軽量クライアント（ネットワークモード・クライアントPC用）
-├── client_gui.py         クライアント用GUIコンポーネント
-├── step1_recorder.py     音声録音
-├── step2_transcriber.py  音声→テキスト変換（STT）
-├── step2_sensevoice.py   SenseVoice STTバックエンド
-├── step3_refiner.py      テキスト整形（LLM）
-├── step4_paster.py       クリップボード＋ペースト
-├── step5_gui.py          GUI（トレイ・設定・履歴）
-├── config.py             設定読み込みユーティリティ
-├── airtype_config.json   設定ファイル
-├── requirements.txt      Python依存パッケージ
-├── AirType_launcher.vbs  シングルPCモード用ランチャー
-├── client_launcher.vbs   クライアントPC用ランチャー
-└── SPEC.md               詳細仕様書
-```
+SenseVoice を使う場合は `sensevoice-onnx/` フォルダを親ディレクトリに配置してください。
 
 ---
 
@@ -190,12 +202,12 @@ AirType/
 
 | 項目 | 内容 |
 |------|------|
-| **Windows専用** | `WH_KEYBOARD_LL`・IME制御・`CREATE_NO_WINDOW` 等のWindows APIを多用。WSLでは動作しない |
-| **Vulkan GPU必須**（LLM使用時）| llama.cpp / whisper.cpp のVulkanビルドを使用。GPU非搭載PCではLLM整形が利用不可 |
-| **認識精度** | 小声・環境音で誤認識が増加。文境界なしで連続発話するとLLMが誤解釈する場合あり |
-| **VRAM消費** | 両サーバー同時動作で約3.8GB（RX 6600, Qwen3.5-2B + kotoba-whisper-q5の場合） |
-| **モデル変更** | 設定ウィンドウからはWhisperモデルのみ変更可。LLMモデルの変更は再起動が必要 |
-| **LLM微細変更** | 類似度チェックをすり抜ける軽微な単語置換（`は→も` 等）が発生することがある |
+| **Windows 専用** | WH_KEYBOARD_LL・IME 制御・CREATE_NO_WINDOW 等の Windows API を多用。WSL 不可 |
+| **Vulkan GPU 必須**（LLM 使用時） | GPU 非搭載 PC では llama-server が動作しない。ネットワークモードで回避可 |
+| **起動時間** | 初回の llama-server + whisper-server 起動に 30〜90 秒かかる |
+| **VRAM 消費** | Qwen3.5-2B + kotoba-whisper-q5 の同時起動で約 3.8 GB（RX 6600 実測） |
+| **認識精度** | 小声・環境音で誤認識増加。文境界なしの連続発話で LLM が誤解釈することがある |
+| **モデル変更** | Whisper モデルは設定 UI から変更可。LLM モデルの変更はアプリ再起動が必要 |
 
 ---
 

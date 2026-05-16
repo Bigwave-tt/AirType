@@ -8,6 +8,9 @@ airtype_stats.json
 airtype_dict.json
 custom_icon.ico
 
+# ローカル設定上書き（個人設定はここに書く）
+airtype_config.local.json
+
 # Claude Code
 .claude/
 

@@ -85,15 +85,15 @@ STT・LLM処理をホストPC側で行います。
 
 | 役割 | PC | 起動スクリプト | 必要なもの |
 |------|----|---------------|-----------|
-| **ホスト（サーバー）** | t-tak（RX 6600搭載） | `api_server.py` | whisper.cpp / llama.cpp / GPU |
-| **クライアント** | mahan | `client.py` | マイク・Python のみ |
+| **ホスト（サーバー）** | HostPC（GPU搭載） | `api_server.py` | whisper.cpp / llama.cpp / GPU |
+| **クライアント** | ClientPC | `client.py` | マイク・Python のみ |
 
-**ホストPC（t-tak）での起動:**
+**ホストPC での起動:**
 ```
 python api_server.py
 ```
 
-**クライアントPC（mahan）での起動:**
+**クライアントPC での起動:**
 ```
 python client.py
 # または

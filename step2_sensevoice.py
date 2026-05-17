@@ -100,6 +100,7 @@ class SenseVoiceTranscriber:
         self._cmvn_std:  Optional[np.ndarray] = None
         self._embeddings: Optional[np.ndarray] = None
         self._ready        = threading.Event()
+        self._infer_lock   = threading.Lock()
 
         _dir = Path(model_dir) if model_dir else _DEFAULT_SENSEVOICE_DIR
         # INT8量子化版を優先、なければFP32版を使用
@@ -268,12 +269,13 @@ class SenseVoiceTranscriber:
         print(f"[SenseVoice] 文字起こし開始: {wav_path.name}")
         self._check_audio_level(wav_path)
 
-        t0       = time.perf_counter()
-        waveform = self._load_wav(wav_path)
-        feats    = self._extract_fbank(waveform)          # FBank + CMVN
-        text     = self._infer(feats)
-        print(f"[SenseVoice] 所要時間: {time.perf_counter() - t0:.2f}秒")
-        print(f"[SenseVoice] 文字起こし結果:\n  → {text!r}")
+        with self._infer_lock:
+            t0       = time.perf_counter()
+            waveform = self._load_wav(wav_path)
+            feats    = self._extract_fbank(waveform)          # FBank + CMVN
+            text     = self._infer(feats)
+            print(f"[SenseVoice] 所要時間: {time.perf_counter() - t0:.2f}秒")
+            print(f"[SenseVoice] 文字起こし結果:\n  → {text!r}")
         return text
 
     def shutdown(self):

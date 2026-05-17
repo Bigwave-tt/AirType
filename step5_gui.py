@@ -378,6 +378,8 @@ class SettingsWindow:
         on_backend_change: "Callable[[str], None]" = lambda b: None,
         get_duck_mode: "Callable[[], str]" = lambda: "mute",
         on_duck_mode_change: "Callable[[str], None]" = lambda m: None,
+        get_serve: "Callable[[], bool]" = lambda: False,
+        on_serve_change: "Callable[[bool], None]" = lambda v: None,
     ):
         self._master    = master
         self._get_model = get_model
@@ -392,6 +394,8 @@ class SettingsWindow:
         self._on_backend_change         = on_backend_change
         self._get_duck_mode             = get_duck_mode
         self._on_duck_mode_change       = on_duck_mode_change
+        self._get_serve                 = get_serve
+        self._on_serve_change           = on_serve_change
         self._win = None
 
     def show(self):
@@ -525,18 +529,38 @@ class SettingsWindow:
             fg="#888888",
         ).grid(row=11, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
 
-        # ── 録音中のシステム音調整 ────────────────────────────────────
+        # ── API サーバー（クライアントPC受付）────────────────────────
         ttk.Separator(win, orient="horizontal").grid(
             row=12, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2)
         )
 
+        serve_var = tk.BooleanVar(value=self._get_serve())
+        tk.Checkbutton(
+            win,
+            text="クライアントPCからの音声入力を受け付ける（API サーバー）",
+            variable=serve_var,
+            font=("Yu Gothic UI", 10),
+        ).grid(row=13, column=0, columnspan=2, sticky="w", **PAD)
+
+        tk.Label(
+            win,
+            text="有効にすると client.py から /dictate で音声を受信します（次回起動時に反映）",
+            font=("Yu Gothic UI", 9),
+            fg="#888888",
+        ).grid(row=14, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+
+        # ── 録音中のシステム音調整 ────────────────────────────────────
+        ttk.Separator(win, orient="horizontal").grid(
+            row=15, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2)
+        )
+
         tk.Label(win, text="録音中のシステム音調整:", font=("Yu Gothic UI", 10, "bold")).grid(
-            row=13, column=0, columnspan=2, sticky="w", **PAD
+            row=16, column=0, columnspan=2, sticky="w", **PAD
         )
 
         duck_var = tk.StringVar(value=self._get_duck_mode())
         duck_frame = tk.Frame(win)
-        duck_frame.grid(row=14, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
+        duck_frame.grid(row=17, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
         for val, label in (
             ("duck", "音量を下げる（15%）"),
             ("mute", "ミュートにする"),
@@ -552,15 +576,15 @@ class SettingsWindow:
             text="録音中に他の音がマイクに混入するのを防ぎます",
             font=("Yu Gothic UI", 9),
             fg="#888888",
-        ).grid(row=15, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+        ).grid(row=18, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
 
         # ── アイコン設定 ──────────────────────────────────────────────
         ttk.Separator(win, orient="horizontal").grid(
-            row=16, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2)
+            row=19, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2)
         )
 
         tk.Label(win, text="アイコン設定:", font=("Yu Gothic UI", 10, "bold")).grid(
-            row=17, column=0, columnspan=2, sticky="w", **PAD
+            row=20, column=0, columnspan=2, sticky="w", **PAD
         )
 
         def _make_icon_row(parent, var, title, row_offset):
@@ -590,17 +614,17 @@ class SettingsWindow:
             tk.Button(frame, text="デフォルトに戻す", command=lambda v=var: v.set("")).pack(side=tk.LEFT, padx=(2, 0))
 
         tray_icon_var = tk.StringVar(value=self._get_icon_path())
-        _make_icon_row(win, tray_icon_var, "トレイアイコン:", 18)
+        _make_icon_row(win, tray_icon_var, "トレイアイコン:", 21)
 
         shortcut_icon_var = tk.StringVar(value=self._get_shortcut_icon_path())
-        _make_icon_row(win, shortcut_icon_var, "デスクトップショートカットアイコン:", 20)
+        _make_icon_row(win, shortcut_icon_var, "デスクトップショートカットアイコン:", 23)
 
         tk.Label(
             win,
             text="PNG / ICO 等に対応。白・単色の背景は自動で除去されます",
             font=("Yu Gothic UI", 9),
             fg="#888888",
-        ).grid(row=22, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 2))
+        ).grid(row=25, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 2))
 
         def _apply_ico_to_lnk(ico_path, lnk_paths):
             import icon_manager
@@ -661,10 +685,10 @@ class SettingsWindow:
         tk.Button(
             win, text="ショートカットのアイコンを今すぐ更新",
             command=_update_shortcuts,
-        ).grid(row=23, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 6))
+        ).grid(row=26, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 6))
 
         btn_frame = tk.Frame(win)
-        btn_frame.grid(row=24, column=0, columnspan=2, pady=(4, 12))
+        btn_frame.grid(row=27, column=0, columnspan=2, pady=(4, 12))
 
         def apply():
             new_backend = backend_var.get()
@@ -690,6 +714,7 @@ class SettingsWindow:
                 _autostart.enable()
             else:
                 _autostart.disable()
+            self._on_serve_change(serve_var.get())
             self._on_refiner_change(refiner_var.get())
             self._on_duck_mode_change(duck_var.get())
             self._on_icon_change(tray_icon_var.get())

@@ -43,29 +43,55 @@ from step3_refiner import LlamaRefiner
 # ─────────────────────────────────────
 # 設定読み込み
 # ─────────────────────────────────────
-_cfg          = _config.load()
-_net          = _cfg["network"]
-_whisper_cfg  = _cfg["whisper"]
-_llama_cfg    = _cfg["llama"]
+_cfg         = _config.load()
+_net         = _cfg["network"]
+_llama_cfg   = _cfg["llama"]
 
 HOST         = _net["host"]
 PORT         = int(_net["port"])
 _cfg_api_key = _net["api_key"]   # 空文字 = 認証なし
 
-# バイナリパス解決
-_whisper_dir = _config.resolve_dir(_whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
-_llama_dir   = _config.resolve_dir(_llama_cfg["dir"],   "llama.cpp-windows-vulkan")
+# llama-server バイナリ・ポート解決
+_llama_dir  = _config.resolve_dir(_llama_cfg["dir"], "llama.cpp-windows-vulkan")
+_llama_port = _config.resolve_port(int(_llama_cfg["server_port"]))
 
-# ポート解決
-_whisper_port = _config.resolve_port(int(_whisper_cfg["server_port"]))
-_llama_port   = _config.resolve_port(int(_llama_cfg["server_port"]))
+
+def _build_transcriber(llama_gate):
+    """
+    airtype_config.json の transcriber.backend に応じて
+    SenseVoiceTranscriber または WhisperTranscriber を生成して返す。
+    main.py の同名関数と同じロジック。
+    """
+    t_cfg   = _cfg.get("transcriber", {})
+    backend = t_cfg.get("backend", "whisper")
+
+    if backend == "sensevoice":
+        from step2_sensevoice import SenseVoiceTranscriber
+        sv_dir = _config.resolve_dir(t_cfg.get("sensevoice_dir", ""), "sensevoice-onnx")
+        return SenseVoiceTranscriber(
+            model_dir=sv_dir,
+            language=t_cfg.get("language", "ja"),
+            startup_gate=llama_gate,
+        )
+
+    # デフォルト: whisper
+    whisper_cfg  = _cfg["whisper"]
+    whisper_dir  = _config.resolve_dir(whisper_cfg["dir"], "whisper.cpp-windows-vulkan")
+    whisper_port = _config.resolve_port(int(whisper_cfg["server_port"]))
+    model_key    = t_cfg.get("model_key", "kotoba-q5")
+    return WhisperTranscriber(
+        startup_gate=llama_gate,
+        whisper_dir=whisper_dir,
+        server_port=whisper_port,
+        model=model_key,
+    )
 
 
 # ─────────────────────────────────────
 # グローバルコンポーネント
 # ─────────────────────────────────────
-_transcriber: WhisperTranscriber | None = None
-_refiner: LlamaRefiner | None           = None
+_transcriber = None
+_refiner: LlamaRefiner | None = None
 _ready = False
 
 # 一時ファイルの残骸追跡（プロセス異常終了時に atexit でクリーンアップ）
@@ -196,12 +222,12 @@ def _init_pipeline():
     """
     global _transcriber, _refiner, _ready
 
+    backend = _cfg.get("transcriber", {}).get("backend", "whisper")
     print("=" * 50)
     print("  AirType API Server を起動しています...")
+    print(f"  STT バックエンド: {backend}")
     print(f"  llama dir  : {_llama_dir}")
-    print(f"  whisper dir: {_whisper_dir}")
     print(f"  llama port : {_llama_port}")
-    print(f"  whisper port: {_whisper_port}")
     print(f"  API key    : {'設定あり' if _cfg_api_key else '設定なし（認証なし）'}")
     print("=" * 50)
 
@@ -210,17 +236,13 @@ def _init_pipeline():
         llama_dir=_llama_dir,
         server_port=_llama_port,
     )
-    _whisper_gate = _refiner._server_ready if _refiner._use_server else None
+    llama_gate = _refiner._server_ready if _refiner._use_server else None
 
-    # Step 2: WhisperTranscriber（llama-server 準備完了後に起動）
-    _transcriber = WhisperTranscriber(
-        startup_gate=_whisper_gate,
-        whisper_dir=_whisper_dir,
-        server_port=_whisper_port,
-    )
+    # Step 2: STT バックエンド（config の backend 設定に従って自動選択）
+    _transcriber = _build_transcriber(llama_gate)
 
-    # サーバーモードの場合、whisper-server の準備を待つ
-    if _transcriber._use_server:
+    # Whisper サーバーモードの場合、準備完了を待つ
+    if hasattr(_transcriber, '_use_server') and _transcriber._use_server:
         print("[API] whisper-server の準備完了を待機中...")
         if not _transcriber._server_ready.wait(timeout=90):
             print("[API] WARNING: whisper-server の起動待機タイムアウト。CLIモードで続行します。")

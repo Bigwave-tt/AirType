@@ -375,7 +375,11 @@ class AirType:
         # 各モジュール初期化
         # 起動順: refiner → transcriber の順で VRAM を優先確保させる
         # llama-server がサーバーモードの場合、その準備完了イベントをゲートとして渡す
-        self.recorder = Recorder()
+        try:
+            self.recorder = Recorder()
+        except RuntimeError as e:
+            print(f"[AirType] WARNING: マイクが見つかりません。ローカル録音は無効です: {e}")
+            self.recorder = None
         self.refiner  = LlamaRefiner(llama_dir=_llama_dir, server_port=_llama_port)
         _llama_gate   = self.refiner._server_ready if self.refiner._use_server else None
         self.transcriber = _build_transcriber(_cfg, _llama_gate)
@@ -438,6 +442,8 @@ class AirType:
             on_backend_change=self._on_backend_change,
             get_duck_mode=lambda: self._duck_mode,
             on_duck_mode_change=self._on_duck_mode_change,
+            get_serve=lambda: _cfg["network"].get("serve", False),
+            on_serve_change=self._on_serve_change,
         )
 
         # 個人辞書ウィンドウ
@@ -519,6 +525,10 @@ class AirType:
             return
         self._ptt_key_down = True
 
+        if self.recorder is None:
+            print("[AirType] マイクが接続されていないため録音できません")
+            return
+
         with self._state_lock:
             if self.state != State.IDLE:
                 return
@@ -584,6 +594,8 @@ class AirType:
 
     # ── 録音停止 & WAV キュー投入 ──────────────────────────────────────
     def _stop_and_enqueue(self):
+        if self.recorder is None:
+            return
         try:
             wav_path = self.recorder.stop()
             print(f"[AirType] WAV をキューに投入: {wav_path.name}")
@@ -725,6 +737,13 @@ class AirType:
         self._duck_mode = mode
         labels = {"mute": "ミュート", "duck": "音量を下げる", "off": "無効"}
         print(f"[AirType] 録音中音量調整: {labels.get(mode, mode)}")
+
+    def _on_serve_change(self, enabled: bool):
+        """API サーバー有効/無効を設定に保存する（次回起動時に反映）。"""
+        import config as _cfg_mod
+        _cfg_mod.save_value("network", "serve", enabled)
+        state_str = "有効" if enabled else "無効"
+        print(f"[AirType] API サーバー設定: {state_str} (次回起動時に反映)")
 
     def _change_model(self, model_key: str):
         """モデルを変更する（設定ウィンドウの適用ボタンから呼ばれる）。

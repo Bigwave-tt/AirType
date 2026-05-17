@@ -3,9 +3,11 @@
   "network": {
     "_comment_server_url": "client.py が接続するサーバーのURL",
     "server_url": "http://YOUR_SERVER_IP:8000/dictate",
-    "_comment_host": "api_server.py がリッスンするアドレス (0.0.0.0=全IF, 127.0.0.1=ローカルのみ)",
+    "_comment_serve": "true にすると main.py 起動時に /dictate API サーバーも内蔵で起動する",
+    "serve": true,
+    "_comment_host": "API サーバーがリッスンするアドレス (0.0.0.0=全IF, 127.0.0.1=ローカルのみ)",
     "host": "0.0.0.0",
-    "_comment_port": "api_server.py のポート番号",
+    "_comment_port": "API サーバーのポート番号",
     "port": 8000,
     "_comment_api_key": "APIキー認証。空文字の場合は認証なし。client.py と api_server.py で同じ値を設定すること",
     "api_key": "",

@@ -33,7 +33,8 @@ from pynput import keyboard
 SAMPLE_RATE = 16000       # Whisper が期待するサンプルレート (16kHz)
 CHANNELS = 1              # モノラル
 DTYPE = "int16"           # 16bit PCM
-PREROLL_SECS = 0.3        # PTT 押下前のプリロール時間 (秒)
+PREROLL_SECS  = 0.3       # PTT 押下前のプリロール時間 (秒)
+POSTROLL_SECS = 0.3       # PTT 離放後に追加で録音する時間 (末尾切れ防止)
 HOTKEY = {keyboard.Key.ctrl_l, keyboard.Key.shift, keyboard.KeyCode(char=" ")}
 # ※ OS・キーボードレイアウトにより ctrl_r / shift_r を追加する場合は HOTKEY を拡張
 
@@ -149,6 +150,9 @@ class Recorder:
         録音を停止し、WAV ファイルに保存して Path を返す。
         ファイルは tempfile で作成され、呼び出し元が削除責任を持つ。
         """
+        # PTT 離放直後の末尾音声を拾うポストロール
+        time.sleep(POSTROLL_SECS)
+
         with self._lock:
             self._collecting = False
             frames = self._frames.copy()
